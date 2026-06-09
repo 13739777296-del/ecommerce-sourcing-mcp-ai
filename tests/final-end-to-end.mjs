@@ -16,7 +16,7 @@
 
 import { createContext } from "../mcp/runtime.mjs";
 import { openSourcingDb } from "../lib/db.js";
-import { openAiSessionWithAccount, aiJdSearch, aiExtractJdProducts, aiTaobaoSearch, aiTaobaoSearchByImage, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
+import { openAiSessionWithAccount, aiJdSearch, aiExtractJdProducts, aiTaobaoSearch, aiExtractTaobaoProducts, aiClickTaobaoProduct, aiExtractTaobaoDetail } from "../lib/ai-controller.js";
 import { profileSummary } from "../lib/accounts.js";
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateProfitByStrategy, DEFAULT_STRATEGIES } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
@@ -94,14 +94,16 @@ async function endToEndTest() {
     console.log(`✅ 找到 ${taobaoProducts.length} 个淘宝商品`);
 
     // 筛选：国内发货 + 已售>=10
-    const taobaoQualified = taobaoProducts.filter(p => {
-      // 解析销量
-      const salesMatch = p.sales?.match(/(\d+(?:\.\d+)?)[万千]?/);
-      const salesNum = salesMatch ? parseFloat(salesMatch[1]) : 0;
-      const actualSales = p.sales?.includes('万') ? salesNum * 10000 : (p.sales?.includes('千') ? salesNum * 1000 : salesNum);
+    const taobaoQualified = taobaoProducts
+      .map((p, index) => ({ ...p, originalIndex: index }))
+      .filter(p => {
+        // 解析销量
+        const salesMatch = p.sales?.match(/(\d+(?:\.\d+)?)[万千]?/);
+        const salesNum = salesMatch ? parseFloat(salesMatch[1]) : 0;
+        const actualSales = p.sales?.includes('万') ? salesNum * 10000 : (p.sales?.includes('千') ? salesNum * 1000 : salesNum);
 
-      return p.isDomestic && actualSales >= 10;
-    });
+        return p.isDomestic && actualSales >= 10;
+      });
 
     console.log(`   筛选（国内发货+已售>=10）: ${taobaoQualified.length} 个`);
 
@@ -110,11 +112,57 @@ async function endToEndTest() {
       process.exit(1);
     }
 
-    // ===== 步骤3: 比价找最低价 =====
-    console.log(`\n【步骤3】比价并计算利润...`);
+    // ===== 步骤3: 逐个点开详情页，提取完整信息 =====
+    console.log(`\n【步骤3】逐个点开详情页，提取SKU和48小时发货...`);
+
+    const taobaoDetails = [];
+    for (let i = 0; i < Math.min(taobaoQualified.length, 5); i++) {  // 最多点5个
+      const product = taobaoQualified[i];
+      console.log(`\n   [${i + 1}/${Math.min(taobaoQualified.length, 5)}] ${product.title.substring(0, 40)}...`);
+
+      try {
+        // 回到搜索列表页
+        if (i > 0) {
+          await taobaoSession.page.goBack();
+          await taobaoSession.page.waitForTimeout(1500);
+        }
+
+        // 点击进入详情
+        await aiClickTaobaoProduct(taobaoSession.page, product.originalIndex);
+
+        // 提取详情
+        const detail = await aiExtractTaobaoDetail(taobaoSession.page);
+
+        // 合并列表页和详情页信息
+        taobaoDetails.push({
+          ...product,
+          ...detail,
+          detailExtracted: true
+        });
+
+        console.log(`   ✅ 提取完成 | 价格:¥${detail.price} | ${detail.shipFrom}发货${detail.shipHours ? `(${detail.shipHours}h内)` : ''}`);
+
+      } catch (error) {
+        console.log(`   ⚠️  提取失败: ${error.message}`);
+      }
+    }
+
+    console.log(`\n✅ 详情页提取完成，共 ${taobaoDetails.length} 个`);
+
+    // 再次筛选：48小时内发货
+    const taobao48h = taobaoDetails.filter(p => !p.shipHours || p.shipHours <= 48);
+    console.log(`   筛选（48小时内发货）: ${taobao48h.length} 个`);
+
+    if (taobao48h.length === 0) {
+      console.log("❌ 没有48小时内发货的商品");
+      process.exit(1);
+    }
+
+    // ===== 步骤4: 比价找最低价 =====
+    console.log(`\n【步骤4】比价并计算利润...`);
 
     const matches = [];
-    for (const taobaoProduct of taobaoQualified) {
+    for (const taobaoProduct of taobao48h) {
       // 计算淘宝单价
       const taobaoUnitPrice = calculateUnitPrice(taobaoProduct.price, taobaoProduct.title);
       Object.assign(taobaoProduct, {

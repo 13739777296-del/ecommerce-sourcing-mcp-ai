@@ -13,56 +13,8 @@ const pluginRoot = dirname(__dirname);
 
 const toolSpecs = [
   {
-    mcpName: "ecommerce_sourcing_bootstrap",
-    modulePath: "../tools/bootstrap.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_usage_guide",
-    modulePath: "../tools/usage-guide.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_accounts",
-    modulePath: "../tools/accounts.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_ai_select",
-    modulePath: "../tools/ai-select.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_strategy",
-    modulePath: "../tools/strategy.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_agent_collect",
-    modulePath: "../tools/agent-collect.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_ai_browser",
-    modulePath: "../tools/ai-browser.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_run_selection",
-    modulePath: "../tools/run-selection.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_status",
-    modulePath: "../tools/status.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_selection_report",
-    modulePath: "../tools/selection-report.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_export_results",
-    modulePath: "../tools/export-results.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_check_accounts",
-    modulePath: "../tools/check-accounts.js"
-  },
-  {
-    mcpName: "ecommerce_sourcing_strategy_library",
-    modulePath: "../tools/strategy-library.js"
+    mcpName: "ecommerce_sourcing",
+    modulePath: "../tools/sourcing.js"
   }
 ];
 

@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+
+# runtime data
+.ecommerce-sourcing-data/
+.smoke-data/
+.real-test-data/
+exports/
+reports/
+artifacts/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# logs and temp
+*.log
+logs/
+tmp/
+test-results/
+
+# secrets
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.crt
+credentials.json
+secrets.json
+secrets.yaml
+auth.json
+
+# editor/system
+.DS_Store
+.claude/
+.codex/
+*.code-workspace

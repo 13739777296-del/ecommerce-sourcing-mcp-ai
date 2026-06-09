@@ -1,0 +1,40 @@
+{
+  "name": "ecommerce-sourcing-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "电商选品 Agent MCP 插件包，提供 AI 浏览器选品、账号检查、策略库、结果导出和任务复盘工具。",
+  "bin": {
+    "ecommerce-sourcing-mcp": "./mcp/server.mjs",
+    "ecommerce-sourcing-mcp-http": "./mcp/http-server.mjs",
+    "ecommerce-sourcing-mcp-worker": "./mcp/local-worker.mjs"
+  },
+  "scripts": {
+    "mcp": "node mcp/server.mjs",
+    "mcp:http": "node mcp/http-server.mjs",
+    "worker": "node mcp/local-worker.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": [
+    "lib",
+    "mcp",
+    "scripts",
+    "tools",
+    "README.md",
+    "package.json"
+  ],
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "playwright-core": "^1.57.0"
+  },
+  "devDependencies": {
+    "@types/node": "25.9.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

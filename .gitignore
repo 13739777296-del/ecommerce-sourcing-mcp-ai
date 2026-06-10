@@ -18,6 +18,7 @@ artifacts/
 logs/
 tmp/
 test-results/
+tests/*-shots/
 
 # secrets
 .env

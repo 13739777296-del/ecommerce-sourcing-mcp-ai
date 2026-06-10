@@ -15,7 +15,7 @@ import { fullSelectionFlow, batchSelection } from "../lib/full-selection.js";
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { exportToFeishu, bindFeishu, sendFeishuMsg } from "../lib/feishu.js";
+import { exportToFeishu, bindFeishu, sendFeishuMsg, startFeishuChannel, readFeishuMsgs, stopFeishuChannel } from "../lib/feishu.js";
 
 export const description = "电商选品All-in-One工具。支持：策略库管理、单步操作（搜索/提取/详情）、完整自动化选品（京东→淘宝→比价）。一个MCP搞定所有场景。";
 
@@ -38,7 +38,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
-        "export_results", "export_feishu", "bind_feishu", "notify_user",
+        "export_results", "export_feishu", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "full_selection", "batch_selection",
         "close"
       ],
@@ -355,6 +355,17 @@ export async function handler(ctx, db, input) {
       return { ok: result.ok, action, message: result.message };
     }
 
+
+    // ===== 飞书双向通道（WebSocket长连接）=====
+    if (action === "start_feishu_channel") {
+      const result = await startFeishuChannel(ctx?.dataDir || ".");
+      return { ok: result.ok, action, message: result.message };
+    }
+
+    if (action === "check_feishu_msgs") {
+      const result = readFeishuMsgs();
+      return { ok: true, action, count: result.count, messages: result.messages, message: result.count > 0 ? `有 ${result.count} 条新消息` : "无新消息" };
+    }
     // ===== 通过飞书通知用户（Agent主动发消息）=====
     if (action === "notify_user") {
       if (!input.message) return { ok: false, message: "缺少 message（消息内容）" };

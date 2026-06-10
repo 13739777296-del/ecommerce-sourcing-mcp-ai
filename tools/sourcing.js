@@ -181,6 +181,8 @@ function loadStrategyDefaults(strategyId) {
     id: s.id,
     name: s.name,
     jd: {
+      searchSuffix: s.platforms?.jd?.searchSuffix || "",
+      collectShopNames: s.platforms?.jd?.collectShopNames !== false,
       shopTypes: s.platforms?.jd?.shopTypes || { include: ["buyer"], exclude: [] },
       minComments: s.platforms?.jd?.minComments ?? 2,
       priceRange: s.platforms?.jd?.priceRange || [80, 999999]
@@ -531,6 +533,8 @@ export async function handler(ctx, db, input) {
           maxPagesPerShop: input.maxPagesPerShop || 3,
           minComments: input.minComments ?? st.jd.minComments,
           priceRange: st.jd.priceRange,
+          searchSuffix: st.jd.searchSuffix,
+          collectShopNames: st.jd.collectShopNames,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
         });
       } finally { /* 浏览器不关 */ }

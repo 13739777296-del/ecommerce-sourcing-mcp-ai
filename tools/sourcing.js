@@ -168,6 +168,31 @@ async function openSessionChecked(ctx, db, platform) {
   throw err;
 }
 
+// 从策略引擎读默认值，调用方可覆盖。策略引擎是唯一真相来源。
+function loadStrategyDefaults(strategyId) {
+  const s = DEFAULT_STRATEGIES[strategyId || "no-source-arbitrage"] || DEFAULT_STRATEGIES["no-source-arbitrage"];
+  return {
+    id: s.id,
+    name: s.name,
+    jd: {
+      shopTypes: s.platforms?.jd?.shopTypes || { include: ["buyer"], exclude: [] },
+      minComments: s.platforms?.jd?.minComments ?? 2,
+      priceRange: s.platforms?.jd?.priceRange || [80, 999999]
+    },
+    taobao: {
+      shipFrom: s.platforms?.taobao?.shipFrom || "domestic",
+      shipWithinHours: s.platforms?.taobao?.shipWithinHours ?? 48,
+      minSales: s.platforms?.taobao?.minSales ?? 10,
+      priceRange: s.platforms?.taobao?.priceRange || [80, 999999]
+    },
+    profit: {
+      minRate: s.profit?.minRate ?? 0.35,
+      maxRate: s.profit?.maxRate ?? 0.60,
+      minAmount: s.profit?.minAmount ?? 20
+    }
+  };
+}
+
 export async function handler(ctx, db, input) {
   const action = input.action;
   const platform = input.platform || "jd";
@@ -364,10 +389,11 @@ export async function handler(ctx, db, input) {
       };
     }
 
-    // ===== 京东选品（推荐入口，用验证过的 aiJdHarvest）=====
+    // ===== 京东选品（用策略引擎默认值）=====
     if (action === "jd_harvest") {
       const brand = input.brand || input.keyword;
       if (!brand) return { ok: false, message: "缺少 brand（品牌词，如 SWISSE）" };
+      const st = loadStrategyDefaults(input.strategyId);
 
       const session = await openSessionChecked(ctx, db, "jd");
       let result;
@@ -375,12 +401,11 @@ export async function handler(ctx, db, input) {
         result = await aiJdHarvest(session.page, brand, {
           targetCount: input.targetCount || 10,
           maxPagesPerShop: input.maxPagesPerShop || 3,
-          minComments: 2,
+          minComments: input.minComments ?? st.jd.minComments,
+          priceRange: st.jd.priceRange,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
         });
-      } finally {
-        // 浏览器不关，保持打开避免反复开闭触发风控
-      }
+      } finally { /* 浏览器不关 */ }
 
       return {
         ok: true,
@@ -395,23 +420,23 @@ export async function handler(ctx, db, input) {
     }
 
 
-    // ===== 淘宝选品（推荐入口，用验证过的 aiTaobaoHarvest）=====
+    // ===== 淘宝选品（用策略引擎默认值）=====
     if (action === "taobao_harvest") {
       if (!input.keyword) return { ok: false, message: "缺少 keyword(用京东品的品牌+品名)" };
+      const st = loadStrategyDefaults(input.strategyId);
       const session = await openSessionChecked(ctx, db, "taobao");
       let result;
       try {
         result = await aiTaobaoHarvest(session.page, input.keyword, {
           maxList: input.maxCount || 40,
           maxDetail: input.maxDetail || 10,
-          minSales: input.minSales ?? 10,
-          requireDomestic: input.requireDomestic !== false,
-          require48h: input.require48h !== false,
+          minSales: input.minSales ?? st.taobao.minSales,
+          requireDomestic: input.requireDomestic ?? (st.taobao.shipFrom === "domestic"),
+          require48h: input.require48h ?? (st.taobao.shipWithinHours === 48),
+          priceRange: st.taobao.priceRange,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         });
-      } finally {
-        // 浏览器不关
-      }
+      } finally { /* 浏览器不关 */ }
       return {
         ok: true,
         action,

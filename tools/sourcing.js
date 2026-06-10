@@ -327,32 +327,29 @@ export async function handler(ctx, db, input) {
       };
     }
 
-    // ===== 导出到飞书多维表格（图片直接嵌在单元格里）=====
+    // ===== 导出到飞书多维表格（图片嵌单元格，扫码绑定后即可用）=====
     if (action === "export_feishu") {
       const result = await exportToFeishu(db, ctx?.dataDir || ".");
-      if (result.needConfig) {
-        return { ok: false, action, needConfig: true, guide: result.guide, message: "飞书未配置，请按 guide 设置 FEISHU_APP_ID / FEISHU_APP_SECRET" };
+      if (result.needBind) {
+        return { ok: false, action, needBind: true, message: result.message + "，请先调 bind_feishu" };
+      }
+      if (!result.ok) {
+        return { ok: false, action, message: result.message };
       }
       return {
         ok: true,
         action,
         count: result.count,
         url: result.url,
-        message: result.message
+        message: result.message || `已导出到飞书多维表格`
       };
     }
 
-    // ===== 绑定飞书（扫码授权，一次性。需先配 FEISHU_APP_ID / FEISHU_APP_SECRET）=====
+    // ===== 绑定飞书（扫码即可，飞书自动创建应用）=====
     if (action === "bind_feishu") {
-      const appId = process.env.FEISHU_APP_ID;
-      const appSecret = process.env.FEISHU_APP_SECRET;
-      if (!appId || !appSecret) {
-        return { ok: false, needConfig: true, message: "缺少 FEISHU_APP_ID / FEISHU_APP_SECRET 环境变量" };
-      }
       const result = await bindFeishu(ctx?.dataDir || ".");
-      return { ok: true, action, message: result.message };
+      return { ok: result.ok, action, message: result.message };
     }
-
     // ===== 京东单步操作 =====
     if (action === "jd_search") {
       if (!input.keyword) return { ok: false, message: "缺少关键词" };

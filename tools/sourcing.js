@@ -35,6 +35,7 @@ export const parameters = {
       type: "string",
       enum: [
         "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide",
+        "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
@@ -204,6 +205,38 @@ export async function handler(ctx, db, input) {
   profileSummary(ctx, db);
 
   try {
+    // ===== 预热：检查已有浏览器和登录状态（不开关浏览器）=====
+    if (action === "warmup") {
+      const platforms = input.platform ? [input.platform] : ["jd", "taobao"];
+      const report = {};
+      for (const p of platforms) {
+        report[p] = [];
+        const accounts = db.listAccounts(p);
+        if (accounts.length === 0) {
+          report[p].push({ displayName: "(无账号)", status: "none", ready: false, event: `请先 account_add 添加${p==="jd"?"京东":"淘宝"}账号` });
+          continue;
+        }
+        // 只读数据库状态，不 probe（探测要开Chrome，会打断已有窗口）
+        for (const acct of accounts) {
+          report[p].push({
+            displayName: acct.displayName,
+            status: acct.status,
+            lastEvent: acct.lastEvent,
+            ready: acct.status === "available",
+            note: acct.status === "available" ? "可工作" : "需 account_login 扫码登录"
+          });
+        }
+      }
+      const readyCount = Object.values(report).flat().filter(a => a.ready).length;
+      const totalCount = Object.values(report).flat().length;
+      return {
+        ok: true, action, report, readyCount, totalCount,
+        allReady: readyCount === totalCount,
+        message: `${readyCount}/${totalCount} 个账号就绪` +
+          (readyCount < totalCount ? "。未就绪的: " + Object.values(report).flat().filter(a=>!a.ready).map(a=>a.displayName).join("、") + "，请 account_login" : "，可以开始工作"),
+      };
+    }
+
     // ===== 使用指南（Agent接此MCP后先看这里）=====
     if (action === "usage_guide") {
       return {

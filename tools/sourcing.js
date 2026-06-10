@@ -34,7 +34,7 @@ export const parameters = {
     action: {
       type: "string",
       enum: [
-        "strategy_list", "strategy_get", "strategy_save", "strategy_templates",
+        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
@@ -204,6 +204,50 @@ export async function handler(ctx, db, input) {
   profileSummary(ctx, db);
 
   try {
+    // ===== 使用指南（Agent接此MCP后先看这里）=====
+    if (action === "usage_guide") {
+      return {
+        ok: true,
+        action,
+        guide: {
+          name: "电商选品MCP",
+          description: "一套通用AI驱动选品引擎。京东找买手店品 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
+          workflow: "京东选品(jd_harvest) → 淘宝比价(taobao_harvest) → Agent清洗配对 → 存库 → 导出(export_results/export_feishu)",
+          actions: {
+            core: [
+              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店→翻页→进详情→评价>2", params: "brand, targetCount(默认10), maxPagesPerShop(默认3)" },
+              { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
+            ],
+            data: [
+              { name: "export_results", desc: "导出CSV到本地，表格含京东+淘宝+利润+链接" },
+              { name: "export_feishu", desc: "导出飞书多维表格，截图嵌单元格在线看。需先bind_feishu绑定" },
+            ],
+            feishu: [
+              { name: "bind_feishu", desc: "扫码绑定飞书（一次就行，零配置）" },
+              { name: "notify_user", desc: "通过飞书发通知给用户（仅通知，不是聊天）", note: "飞书是单向通知渠道。如需双向对话，用Hermes/OpenClaw等工具接入本MCP" },
+            ],
+            accounts: [
+              { name: "account_list", desc: "列出所有账号及状态" },
+              { name: "account_login", desc: "打开浏览器扫码登录账号" },
+              { name: "account_check", desc: "探测账号真实登录态" },
+            ],
+            strategy: [
+              { name: "strategy_templates", desc: "查看内置策略模板" },
+              { name: "strategy_get", desc: "查看策略详情(strategyId)" },
+            ]
+          },
+          tips: [
+            "京东搜'品牌+买手店'(如SWISSE 买手店)命中率最高",
+            "Agent负责清洗:算最小规格单价+同款去重+按策略利润筛选",
+            "筛选逻辑从策略引擎读取(loadStrategyDefaults)，改策略文件即生效",
+            "浏览器永不关闭(避免风控)，账号存本机(用户隔离)",
+            "CSV表格嵌不了图，飞书表格可以嵌图在线看"
+          ]
+        },
+        message: "使用指南已返回，请按 guide.actions 查看可用操作"
+      };
+    }
+
     // ===== 策略库管理 =====
     if (action === "strategy_templates") {
       return {

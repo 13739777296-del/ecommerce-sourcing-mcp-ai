@@ -195,6 +195,11 @@ function loadStrategyDefaults(strategyId) {
       minRate: s.profit?.minRate ?? 0.35,
       maxRate: s.profit?.maxRate ?? 0.60,
       minAmount: s.profit?.minAmount ?? 20
+    },
+    riskControl: {
+      retryAfterHours: s.riskControl?.retryAfterHours ?? 5,
+      notifyOnDetection: s.riskControl?.notifyOnDetection ?? true,
+      maxRetries: s.riskControl?.maxRetries ?? 3
     }
   };
 }

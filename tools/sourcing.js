@@ -159,7 +159,7 @@ async function openSessionChecked(ctx, db, platform) {
     }
     tried.push(`${acct.displayName}(${probe.event})`);
   }
-  await closeAiSessionsByPlatform(platform).catch(() => {});
+  // 全部不可用
   const err = new Error(
     `${platform === "jd" ? "京东" : "淘宝"}没有已登录的账号。已检查：${tried.join("、")}。` +
     `请先 account_login 扫码登录任一账号再重试。`
@@ -281,10 +281,9 @@ export async function handler(ctx, db, input) {
       };
     }
 
-    // ===== 关闭 =====
+    // ===== 关闭（不真关浏览器，避免反复开闭触发风控）=====
     if (action === "close") {
-      const n = await closeAiSessionsByPlatform(platform);
-      return { ok: true, action, message: `${platform}浏览器已关闭（${n}个会话）` };
+      return { ok: true, action, message: "浏览器保持打开（不关闭以避免风控）" };
     }
 
     // ===== 导出选品结果为CSV表格（存本地，可下载）=====
@@ -380,7 +379,7 @@ export async function handler(ctx, db, input) {
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
         });
       } finally {
-        await closeAiSessionsByPlatform("jd").catch(() => {});
+        // 浏览器不关，保持打开避免反复开闭触发风控
       }
 
       return {
@@ -411,7 +410,7 @@ export async function handler(ctx, db, input) {
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         });
       } finally {
-        await closeAiSessionsByPlatform("taobao").catch(() => {});
+        // 浏览器不关
       }
       return {
         ok: true,

@@ -7,12 +7,13 @@
  * - 完整自动化选品
  */
 
-import { openAiSessionWithAccount, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, closeAiSession, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
-import { profileSummary } from "../lib/accounts.js";
+import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, closeAiSession, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
+import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus } from "../lib/accounts.js";
 import { evaluateJdProductByStrategy, DEFAULT_STRATEGIES } from "../lib/strategy-engine.js";
 import { fullSelectionFlow, batchSelection } from "../lib/full-selection.js";
 
 import { openSourcingDb } from "../lib/db.js";
+import { join as pathJoin } from "node:path";
 
 export const description = "电商选品All-in-One工具。支持：策略库管理、单步操作（搜索/提取/详情）、完整自动化选品（京东→淘宝→比价）。一个MCP搞定所有场景。";
 
@@ -34,6 +35,7 @@ export const parameters = {
         "strategy_list", "strategy_get", "strategy_save", "strategy_templates",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
+        "account_list", "account_add", "account_login", "account_check", "account_remove",
         "full_selection", "batch_selection",
         "close"
       ],
@@ -58,6 +60,14 @@ export const parameters = {
       type: "string",
       enum: ["jd", "taobao"],
       default: "jd"
+    },
+    accountId: {
+      type: "string",
+      description: "账号管理用：account_login/check/remove 指定账号ID"
+    },
+    displayName: {
+      type: "string",
+      description: "账号管理用：account_add 新账号的显示名(如'京东账号一')"
     },
     maxCount: {
       type: "number",
@@ -158,6 +168,83 @@ export async function handler(ctx, db, input) {
     if (action === "strategy_save") {
       // TODO: 保存到数据库
       return { ok: true, action, message: "策略保存功能待实现" };
+    }
+
+    // ===== 账号池管理（每个用户管自己的账号，存本机，隔离）=====
+    if (action === "account_list") {
+      const accounts = db.listAccounts(input.platform || null).map((a) => ({
+        id: a.id,
+        platform: a.platform,
+        displayName: a.displayName,
+        status: a.status,
+        lastEvent: a.lastEvent
+      }));
+      return {
+        ok: true,
+        action,
+        count: accounts.length,
+        accounts,
+        message: `共 ${accounts.length} 个账号（status: available可用 / login_required需登录 / paused风控暂停）`
+      };
+    }
+
+    if (action === "account_add") {
+      const account = createAccount(ctx, db, {
+        platform: input.platform || "jd",
+        displayName: input.displayName
+      });
+      return {
+        ok: true,
+        action,
+        account: { id: account.id, platform: account.platform, displayName: account.displayName, status: account.status },
+        loginUrl: accountLoginUrl(account.platform),
+        nextStep: `账号已创建。下一步调 account_login(accountId:"${account.id}") 打开浏览器扫码登录。`,
+        message: "账号已创建，待登录"
+      };
+    }
+
+    if (action === "account_login") {
+      if (!input.accountId) return { ok: false, message: "缺少 accountId" };
+      const account = db.getAccount(input.accountId);
+      if (!account) return { ok: false, message: `账号不存在：${input.accountId}` };
+      // 打开本机Chrome到登录页，用户扫码后Cookie存进该账号的Profile
+      const loginUrl = accountLoginUrl(account.platform);
+      const session = await openAiSession(account.profileDir, loginUrl);
+      return {
+        ok: true,
+        action,
+        accountId: account.id,
+        loginUrl,
+        message: `已打开${account.platform === "jd" ? "京东" : "淘宝"}登录页，请在弹出的浏览器里扫码登录。登录完成后调 account_check 确认状态。浏览器会话保持打开。`,
+        _sessionOpen: true
+      };
+    }
+
+    if (action === "account_check") {
+      if (!input.accountId) return { ok: false, message: "缺少 accountId" };
+      const account = db.getAccount(input.accountId);
+      if (!account) return { ok: false, message: `账号不存在：${input.accountId}` };
+      const probe = await probeAccountLoginStatus(account);
+      setAccountStatus(db, account.id, probe.status, probe.event);
+      return {
+        ok: true,
+        action,
+        accountId: account.id,
+        status: probe.status,
+        event: probe.event,
+        message: probe.status === "available" ? "账号已登录可用" : `账号状态：${probe.status}（${probe.event}）`
+      };
+    }
+
+    if (action === "account_remove") {
+      if (!input.accountId) return { ok: false, message: "缺少 accountId" };
+      const removed = removeAccount(db, input.accountId);
+      return {
+        ok: true,
+        action,
+        removed: { id: removed.id, displayName: removed.displayName },
+        message: `账号已删除：${removed.displayName}`
+      };
     }
 
     // ===== 关闭 =====
@@ -264,7 +351,8 @@ export async function handler(ctx, db, input) {
         maxDetail: input.maxDetail || 10,
         minSales: input.minSales ?? 10,
         requireDomestic: input.requireDomestic !== false,
-        require48h: input.require48h !== false
+        require48h: input.require48h !== false,
+        screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
       });
       return {
         ok: true,

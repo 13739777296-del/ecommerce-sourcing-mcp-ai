@@ -99,23 +99,19 @@ export const parameters = {
       type: "number",
       default: 10
     },
-    targetCount: {
-      type: "number",
-      description: "批量选品目标数量"
-    },
     brand: {
       type: "string",
       description: "jd_harvest用：品牌词(如SWISSE)，内部拼成\"品牌 买手店\"搜索"
     },
-    maxPages: {
+    targetCount: {
+      type: "number",
+      default: 10,
+      description: "jd_harvest用：目标去重商品数(测试时10即可，正式跑设500-1000)"
+    },
+    maxPagesPerShop: {
       type: "number",
       default: 3,
-      description: "jd_harvest用：搜索结果翻几页(每页约60品，翻越多拉越多)"
-    },
-    maxDetail: {
-      type: "number",
-      default: 20,
-      description: "jd_harvest用：最多进几个详情页拿评价(高频操作，注意风控，建议≤30)"
+      description: "jd_harvest用：每个买手店最多翻几页(每页约60品)"
     },
     minSales: {
       type: "number",
@@ -370,8 +366,8 @@ export async function handler(ctx, db, input) {
       let result;
       try {
         result = await aiJdHarvest(session.page, brand, {
-          maxPages: input.maxPages || 3,
-          maxDetail: input.maxDetail || 20,
+          targetCount: input.targetCount || 10,
+          maxPagesPerShop: input.maxPagesPerShop || 3,
           minComments: 2,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
         });

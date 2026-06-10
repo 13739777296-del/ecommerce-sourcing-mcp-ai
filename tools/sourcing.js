@@ -414,7 +414,7 @@ export async function handler(ctx, db, input) {
         stats: result.stats,
         candidateCount: result.candidates.length,
         candidates: result.candidates,
-        agentInstructions: buildJdCleaningInstructions(result.candidates.length),
+        agentInstructions: buildJdCleaningInstructions(result.candidates.length, st),
         message: `京东选品完成：${result.candidates.length}个评价>2的候选品，请按 agentInstructions 清洗`
       };
     }
@@ -444,7 +444,7 @@ export async function handler(ctx, db, input) {
         stats: result.stats,
         candidateCount: result.candidates.length,
         candidates: result.candidates,
-        agentInstructions: buildTaobaoCleaningInstructions(result.candidates.length),
+        agentInstructions: buildTaobaoCleaningInstructions(result.candidates.length, st),
         message: `淘宝选品完成：${result.candidates.length}个符合(国内+48h+已售达标)的货源，请按 agentInstructions 比价`
       };
     }
@@ -575,14 +575,16 @@ export async function handler(ctx, db, input) {
  * 设计原则：脚本只负责拉脏数据，去重和算最小规格单价这种需要"理解力"的活，
  * 交给调用本MCP的Agent(大模型)做。指令必须整洁、清晰、可执行。
  */
-function buildJdCleaningInstructions(candidateCount) {
+function buildJdCleaningInstructions(candidateCount, strategy) {
+  const p = strategy?.profit || {};
+  const rateRange = `${((p.minRate ?? 0.35) * 100).toFixed(0)}%-${((p.maxRate ?? 0.60) * 100).toFixed(0)}%`;
   return {
     summary: `已拉取 ${candidateCount} 个京东买手店候选品(评价均>2)。请你对 candidates 数组做以下清洗，得到干净的京东品清单。`,
     steps: [
       {
         step: 1,
         name: "算最小规格单价",
-        detail: "从每个品的 title 和 skuInfo 解析规格，把价格换算成『最小规格单价』。规则：含粒/片→每粒每片；含g/kg→每克(kg×1000)；含ml/L→每毫升(L×1000)。例：60粒¥120→¥2/粒。解析不出规格的，标记 unitPrice=null 并保留，备注『规格待人工确认』。",
+        detail: `从每个品的 title 和 skuInfo 解析规格，换算成最小规格单价。规则：粒/片→每粒；g/kg→每克(kg×1000)；ml/L→每毫升(L×1000)。例：60粒¥120→¥2/粒。`,
         output: "给每个品补 unitPrice(数字) 和 unit(粒/g/ml等) 两个字段"
       },
       {
@@ -598,7 +600,7 @@ function buildJdCleaningInstructions(candidateCount) {
         output: "干净的京东基准品清单"
       }
     ],
-    note: "最小规格单价是京东↔淘宝比价的统一标尺。下一步用这些品的标题/图去淘宝找货比价时，也用同样的最小规格单价口径。"
+    note: `后续比价时，利润率需在 ${rateRange} 区间内，最低利润金额 ¥${p.minAmount ?? 20}。`
   };
 }
 
@@ -608,8 +610,11 @@ function buildJdCleaningInstructions(candidateCount) {
  *       ②一个京东品可匹配多个淘宝链接，符合的都保留；
  *       ③用最小规格单价做统一比价标尺。
  */
-function buildTaobaoCleaningInstructions(candidateCount) {
+function buildTaobaoCleaningInstructions(candidateCount, strategy) {
+  const p = strategy?.profit || {};
+  const rateRange = `${((p.minRate ?? 0.35) * 100).toFixed(0)}%-${((p.maxRate ?? 0.60) * 100).toFixed(0)}%`;
   return {
+    summary: `已拉取 ${candidateCount} 个淘宝货源(均已通过 国内+48h+已售达标)。利润区间 ${rateRange}，最低 ¥${p.minAmount ?? 20}。请你完成与京东品的比价。`,
     summary: `已拉取 ${candidateCount} 个淘宝货源(均已通过 国内发货+48h内发+已售达标 三道筛)。请你完成与京东品的比价。`,
     steps: [
       {
@@ -627,7 +632,7 @@ function buildTaobaoCleaningInstructions(candidateCount) {
       {
         step: 3,
         name: "算利润、按策略卡阈值",
-        detail: "用统一的最小规格单价比价：利润率=(京东最小规格单价 - 淘宝最小规格单价)/京东最小规格单价。按当前策略的利润区间(如35%~60%)筛选。符合的才是最终可用品。",
+        detail: `利润率=(京东单价-淘宝单价)/京东单价。保留 ${rateRange} 区间内且利润≥¥${p.minAmount ?? 20} 的。`,
         output: "最终可用品清单：京东品 + 匹配的淘宝货源(可多个) + 各自最小规格单价 + 利润率"
       }
     ],

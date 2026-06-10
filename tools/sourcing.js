@@ -15,6 +15,7 @@ import { fullSelectionFlow, batchSelection } from "../lib/full-selection.js";
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
+import { exportToFeishu } from "../lib/feishu.js";
 
 export const description = "电商选品All-in-One工具。支持：策略库管理、单步操作（搜索/提取/详情）、完整自动化选品（京东→淘宝→比价）。一个MCP搞定所有场景。";
 
@@ -37,7 +38,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
-        "export_results",
+        "export_results", "export_feishu",
         "full_selection", "batch_selection",
         "close"
       ],
@@ -323,6 +324,21 @@ export async function handler(ctx, db, input) {
         outputPath: outPath,
         count,
         message: `已导出 ${count} 条选品结果到：${outPath}（CSV可用Excel打开）`
+      };
+    }
+
+    // ===== 导出到飞书多维表格（图片直接嵌在单元格里）=====
+    if (action === "export_feishu") {
+      const result = await exportToFeishu(db, ctx?.dataDir || ".");
+      if (result.needConfig) {
+        return { ok: false, action, needConfig: true, guide: result.guide, message: "飞书未配置，请按 guide 设置 FEISHU_APP_ID / FEISHU_APP_SECRET" };
+      }
+      return {
+        ok: true,
+        action,
+        count: result.count,
+        url: result.url,
+        message: result.message
       };
     }
 

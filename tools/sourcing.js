@@ -141,6 +141,14 @@ async function openSessionChecked(ctx, db, platform) {
     err.code = "NOT_LOGGED_IN";
     throw err;
   }
+  // 优先用数据库里已知可用的账号（避免每次都开Chrome probe）
+  const knownGood = accounts.find((a) => a.status === "available" && a.platform === platform);
+  if (knownGood) {
+    // 信任数据库状态（最近account_check验证过的），不开Chrome重查
+    console.log(`[预检] 账号「${knownGood.displayName}」状态可用，直接使用`);
+    return await openAiSessionWithAccount(ctx, db, platform, "about:blank", knownGood.id);
+  }
+  // 没有已知可用的，逐个probe
   const tried = [];
   for (const acct of accounts) {
     const probe = await probeAccountLoginStatus(acct);

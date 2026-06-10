@@ -7,13 +7,14 @@
  * - 完整自动化选品
  */
 
-import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, closeAiSession, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
+import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, closeAiSession, closeAiSessionsByPlatform, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
 import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus } from "../lib/accounts.js";
 import { evaluateJdProductByStrategy, DEFAULT_STRATEGIES } from "../lib/strategy-engine.js";
 import { fullSelectionFlow, batchSelection } from "../lib/full-selection.js";
 
 import { openSourcingDb } from "../lib/db.js";
-import { join as pathJoin } from "node:path";
+import { join as pathJoin, dirname } from "node:path";
+import { mkdirSync } from "node:fs";
 
 export const description = "电商选品All-in-One工具。支持：策略库管理、单步操作（搜索/提取/详情）、完整自动化选品（京东→淘宝→比价）。一个MCP搞定所有场景。";
 
@@ -36,6 +37,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
+        "export_results",
         "full_selection", "batch_selection",
         "close"
       ],
@@ -133,6 +135,34 @@ export const parameters = {
   },
   required: ["action"]
 };
+
+// 工作前登录预检：遍历该平台所有账号，用第一个真正登录的。
+// 全部不可用才报错(提示扫码)。这样掉登录的账号会被自动跳过，不卡工作。
+async function openSessionChecked(ctx, db, platform) {
+  const accounts = db.listAccounts(platform);
+  if (!accounts.length) {
+    const err = new Error(`没有${platform === "jd" ? "京东" : "淘宝"}账号，请先 account_add 再 account_login。`);
+    err.code = "NOT_LOGGED_IN";
+    throw err;
+  }
+  const tried = [];
+  for (const acct of accounts) {
+    const probe = await probeAccountLoginStatus(acct);
+    setAccountStatus(db, acct.id, probe.status, probe.event);
+    if (probe.status === "available") {
+      console.log(`[预检] 账号「${acct.displayName}」已登录，开始工作`);
+      return await openAiSessionWithAccount(ctx, db, platform, "about:blank", acct.id);
+    }
+    tried.push(`${acct.displayName}(${probe.event})`);
+  }
+  await closeAiSessionsByPlatform(platform).catch(() => {});
+  const err = new Error(
+    `${platform === "jd" ? "京东" : "淘宝"}没有已登录的账号。已检查：${tried.join("、")}。` +
+    `请先 account_login 扫码登录任一账号再重试。`
+  );
+  err.code = "NOT_LOGGED_IN";
+  throw err;
+}
 
 export async function handler(ctx, db, input) {
   const action = input.action;
@@ -249,8 +279,23 @@ export async function handler(ctx, db, input) {
 
     // ===== 关闭 =====
     if (action === "close") {
-      await closeAiSession(`ai-${platform}`);
-      return { ok: true, action, message: `${platform}浏览器已关闭` };
+      const n = await closeAiSessionsByPlatform(platform);
+      return { ok: true, action, message: `${platform}浏览器已关闭（${n}个会话）` };
+    }
+
+    // ===== 导出选品结果为CSV表格（存本地，可下载）=====
+    if (action === "export_results") {
+      const outPath = input.outputPath || pathJoin(ctx?.dataDir || ".", "exports", `选品结果_${Date.now()}.csv`);
+      mkdirSync(dirname(outPath), { recursive: true });
+      const ret = db.exportSourcing(outPath);
+      const count = typeof ret === "number" ? ret : (ret?.count ?? ret?.rows ?? 0);
+      return {
+        ok: true,
+        action,
+        outputPath: outPath,
+        count,
+        message: `已导出 ${count} 条选品结果到：${outPath}（CSV可用Excel打开）`
+      };
     }
 
     // ===== 京东单步操作 =====
@@ -321,12 +366,18 @@ export async function handler(ctx, db, input) {
       const brand = input.brand || input.keyword;
       if (!brand) return { ok: false, message: "缺少 brand（品牌词，如 SWISSE）" };
 
-      const session = await openAiSessionWithAccount(ctx, db, "jd");
-      const result = await aiJdHarvest(session.page, brand, {
-        maxPages: input.maxPages || 3,
-        maxDetail: input.maxDetail || 20,
-        minComments: 2
-      });
+      const session = await openSessionChecked(ctx, db, "jd");
+      let result;
+      try {
+        result = await aiJdHarvest(session.page, brand, {
+          maxPages: input.maxPages || 3,
+          maxDetail: input.maxDetail || 20,
+          minComments: 2,
+          screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
+        });
+      } finally {
+        await closeAiSessionsByPlatform("jd").catch(() => {});
+      }
 
       return {
         ok: true,
@@ -335,7 +386,6 @@ export async function handler(ctx, db, input) {
         stats: result.stats,
         candidateCount: result.candidates.length,
         candidates: result.candidates,
-        // 给调用方Agent的清洗指令（脚本只拉脏数据，清洗交给你）
         agentInstructions: buildJdCleaningInstructions(result.candidates.length),
         message: `京东选品完成：${result.candidates.length}个评价>2的候选品，请按 agentInstructions 清洗`
       };
@@ -345,15 +395,20 @@ export async function handler(ctx, db, input) {
     // ===== 淘宝选品（推荐入口，用验证过的 aiTaobaoHarvest）=====
     if (action === "taobao_harvest") {
       if (!input.keyword) return { ok: false, message: "缺少 keyword(用京东品的品牌+品名)" };
-      const session = await openAiSessionWithAccount(ctx, db, "taobao");
-      const result = await aiTaobaoHarvest(session.page, input.keyword, {
-        maxList: input.maxCount || 40,
-        maxDetail: input.maxDetail || 10,
-        minSales: input.minSales ?? 10,
-        requireDomestic: input.requireDomestic !== false,
-        require48h: input.require48h !== false,
-        screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
-      });
+      const session = await openSessionChecked(ctx, db, "taobao");
+      let result;
+      try {
+        result = await aiTaobaoHarvest(session.page, input.keyword, {
+          maxList: input.maxCount || 40,
+          maxDetail: input.maxDetail || 10,
+          minSales: input.minSales ?? 10,
+          requireDomestic: input.requireDomestic !== false,
+          require48h: input.require48h !== false,
+          screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
+        });
+      } finally {
+        await closeAiSessionsByPlatform("taobao").catch(() => {});
+      }
       return {
         ok: true,
         action,
@@ -469,6 +524,15 @@ export async function handler(ctx, db, input) {
     return { ok: false, message: `未知操作: ${action}` };
 
   } catch (error) {
+    if (error.code === "NOT_LOGGED_IN") {
+      return {
+        ok: false,
+        action,
+        needLogin: true,
+        accountId: error.accountId,
+        message: error.message
+      };
+    }
     return {
       ok: false,
       action,

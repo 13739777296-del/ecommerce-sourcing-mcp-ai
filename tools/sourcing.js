@@ -349,7 +349,7 @@ export async function handler(ctx, db, input) {
       if (!appId || !appSecret) {
         return { ok: false, needConfig: true, message: "缺少 FEISHU_APP_ID / FEISHU_APP_SECRET 环境变量" };
       }
-      const result = await bindFeishu(appId, appSecret, ctx?.dataDir || ".");
+      const result = await bindFeishu(ctx?.dataDir || ".");
       return { ok: true, action, message: result.message };
     }
 

@@ -15,7 +15,7 @@ import { fullSelectionFlow, batchSelection } from "../lib/full-selection.js";
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { exportToFeishu } from "../lib/feishu.js";
+import { exportToFeishu, bindFeishu } from "../lib/feishu.js";
 
 export const description = "电商选品All-in-One工具。支持：策略库管理、单步操作（搜索/提取/详情）、完整自动化选品（京东→淘宝→比价）。一个MCP搞定所有场景。";
 
@@ -38,7 +38,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
-        "export_results", "export_feishu",
+        "export_results", "export_feishu", "bind_feishu",
         "full_selection", "batch_selection",
         "close"
       ],
@@ -340,6 +340,17 @@ export async function handler(ctx, db, input) {
         url: result.url,
         message: result.message
       };
+    }
+
+    // ===== 绑定飞书（扫码授权，一次性。需先配 FEISHU_APP_ID / FEISHU_APP_SECRET）=====
+    if (action === "bind_feishu") {
+      const appId = process.env.FEISHU_APP_ID;
+      const appSecret = process.env.FEISHU_APP_SECRET;
+      if (!appId || !appSecret) {
+        return { ok: false, needConfig: true, message: "缺少 FEISHU_APP_ID / FEISHU_APP_SECRET 环境变量" };
+      }
+      const result = await bindFeishu(appId, appSecret, ctx?.dataDir || ".");
+      return { ok: true, action, message: result.message };
     }
 
     // ===== 京东单步操作 =====

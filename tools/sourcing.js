@@ -252,7 +252,7 @@ export async function handler(ctx, db, input) {
         guide: {
           name: "电商选品MCP",
           description: "一套通用AI驱动选品引擎。京东找买手店品 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
-          workflow: "京东选品(jd_harvest) → 淘宝比价(taobao_harvest) → Agent清洗配对 → 存库 → 导出(export_results/export_feishu)",
+          workflow: "jd_harvest → Agent从标题提取品牌+品名 → taobao_harvest(以此为keyword) → Agent同款匹配+核算利润 → 存库 → 导出",
           actions: {
             core: [
               { name: "jd_harvest", desc: "京东选品：搜品牌+买手店→翻页→进详情→评价>2", params: "brand, targetCount(默认10), maxPagesPerShop(默认3)" },
@@ -278,7 +278,8 @@ export async function handler(ctx, db, input) {
           },
           tips: [
             "京东搜'品牌+买手店'(如SWISSE 买手店)命中率最高",
-            "Agent负责清洗:算最小规格单价+同款去重+按策略利润筛选",
+            "jd_harvest返回后，Agent从标题提取'品牌+产品名'（别带规格），用作文本taobao_harvest的keyword",
+            "Agent负责清洗:算最小规格单价+同款去重+按策略利润筛选(35%-60%)",
             "筛选逻辑从策略引擎读取(loadStrategyDefaults)，改策略文件即生效",
             "浏览器永不关闭(避免风控)，账号存本机(用户隔离)",
             "CSV表格嵌不了图，飞书表格可以嵌图在线看"

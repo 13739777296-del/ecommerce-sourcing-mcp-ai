@@ -39,7 +39,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
-        "export_results", "export_feishu", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
+        "export_results", "export_feishu", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "full_selection", "batch_selection",
         "close"
       ],
@@ -133,6 +133,14 @@ export const parameters = {
     message: {
       type: "string",
       description: "notify_user用：发送给用户的消息内容"
+    },
+    jdProduct: {
+      type: "object",
+      description: "save_sourcing用：京东品(需含productId/title/price/shop/shopType等)"
+    },
+    taobaoMatches: {
+      type: "array",
+      description: "save_sourcing用：匹配的淘宝品列表(每个需含taobao对象+profit对象)"
     }
   },
   required: ["action"]
@@ -259,6 +267,7 @@ export async function handler(ctx, db, input) {
               { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
             ],
             data: [
+              { name: "save_sourcing", desc: "Agent匹配后存库：京东品+淘宝匹配列表→入库，供导出用", params: "jdProduct, taobaoMatches, strategyId" },
               { name: "export_results", desc: "导出CSV到本地，表格含京东+淘宝+利润+链接" },
               { name: "export_feishu", desc: "导出飞书多维表格，截图嵌单元格在线看。需先bind_feishu绑定" },
             ],
@@ -401,6 +410,16 @@ export async function handler(ctx, db, input) {
       return { ok: true, action, message: "浏览器保持打开（不关闭以避免风控）" };
     }
 
+    // ===== Agent匹配后存库（京东品+淘宝匹配列表→入库）=====
+    if (action === "save_sourcing") {
+      const jd = input.jdProduct;
+      const matches = input.taobaoMatches || [];
+      if (!jd || !jd.productId) return { ok: false, action, message: "缺少 jdProduct.productId" };
+      const st = loadStrategyDefaults(input.strategyId);
+      db.saveSourcing(jd, matches, null, { id: st.id });
+      return { ok: true, action, saved: matches.length, message: `已存库: 1个京东品 + ${matches.length}个淘宝匹配` };
+    }
+
     // ===== 导出选品结果为CSV表格（存本地，可下载）=====
     if (action === "export_results") {
       const outPath = input.outputPath || pathJoin(ctx?.dataDir || ".", "exports", `选品结果_${Date.now()}.csv`);
@@ -539,6 +558,11 @@ export async function handler(ctx, db, input) {
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
         });
       } finally { /* 浏览器不关 */ }
+
+      // 自动存库
+      for (const c of result.candidates) {
+        try { db.saveSourcing({ productId: c.productId, title: c.title, price: c.price, shop: c.shop, shopType: c.shopType || 'buyer', comments: String(c.commentsNum||''), skuInfo: c.skuInfo || '', url: c.url, screenshotPath: c.screenshotPath || '' }, [], null, { id: st.id }); } catch (e) {}
+      }
 
       return {
         ok: true,

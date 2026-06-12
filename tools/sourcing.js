@@ -419,7 +419,8 @@ export async function handler(ctx, db, input) {
           ],
           safeRun: [
             "遇到验证码、安全验证、访问频繁、登录失效会停止，由 Agent 通知用户处理。",
-            "浏览器会话默认保持打开，不主动清空 profile。"
+            "浏览器会话默认保持打开，不主动清空 profile。",
+            "排查问题先调用 logs；jd_harvest 会记录店铺命中/跳过摘要，taobao_harvest 会记录基础规则筛选和淘汰原因摘要。"
           ]
         },
         message: "已返回批量选品脚本用法和最终去重规则"
@@ -813,6 +814,10 @@ export async function handler(ctx, db, input) {
       }
       const rejected = [...(result.rejected || []), ...strategyRejected];
       safeAddLog(db, saveErrors.length ? "warn" : "info", `jd_harvest 完成：合格候选 ${candidates.length}，淘汰 ${rejected.length}，入库 ${savedCount}，失败 ${saveErrors.length}`);
+      const jdStatsSummary = summarizeJdHarvestStats(result.stats);
+      if (jdStatsSummary) safeAddLog(db, "info", `jd_harvest 店铺筛选摘要：${jdStatsSummary}`);
+      const jdRejectSummary = summarizeRejectReasons(rejected);
+      if (jdRejectSummary) safeAddLog(db, "info", `jd_harvest 淘汰原因汇总：${jdRejectSummary}`);
       const suggestedTaobaoTasks = candidates.map((candidate) => {
         const brandName = candidate.brand || extractBrand(candidate.title);
         return {
@@ -891,6 +896,10 @@ export async function handler(ctx, db, input) {
       });
       const rejected = [...(result.rejected || []), ...taobaoStrategyRejected];
       safeAddLog(db, "info", `taobao_harvest 完成：keyword=${input.keyword}，候选 ${candidates.length}，淘汰 ${rejected.length}`);
+      const taobaoStatsSummary = summarizeTaobaoHarvestStats(result.stats);
+      if (taobaoStatsSummary) safeAddLog(db, "info", `taobao_harvest 列表筛选摘要：${taobaoStatsSummary}`);
+      const taobaoRejectSummary = summarizeRejectReasons(rejected);
+      if (taobaoRejectSummary) safeAddLog(db, "info", `taobao_harvest 淘汰原因汇总：${taobaoRejectSummary}`);
       return {
         ok: true,
         action,
@@ -982,6 +991,97 @@ function clampLimit(value, fallback) {
   const n = Number(value || fallback);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(1, Math.min(500, Math.floor(n)));
+}
+
+function summarizeJdHarvestStats(stats) {
+  const shopStats = Array.isArray(stats?.shopStats) ? stats.shopStats : [];
+  if (!shopStats.length) return "";
+  const total = shopStats.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const matched = shopStats.reduce((sum, item) => sum + Number(item.matched || 0), 0);
+  const skipped = sumSkipped(shopStats);
+  const byShop = new Map();
+  for (const item of shopStats) {
+    const key = item.shopName || "未知店铺";
+    const current = byShop.get(key) || { pages: 0, total: 0, matched: 0, skipped: {} };
+    current.pages += 1;
+    current.total += Number(item.total || 0);
+    current.matched += Number(item.matched || 0);
+    current.skipped = addSkipped(current.skipped, item.skipped || {});
+    byShop.set(key, current);
+  }
+  const shopBrief = [...byShop.entries()]
+    .slice(0, 5)
+    .map(([shop, item]) => `${shop}: ${item.pages}页/${item.total}原始/${item.matched}命中/跳过${formatSkipObject(item.skipped)}`)
+    .join("；");
+  return `收集店铺${stats?.shopsCollected ?? "-"}个，尝试${stats?.shopsTried ?? byShop.size}个；列表原始${total}个，命中${matched}个，跳过${formatSkipObject(skipped)}；明细 ${shopBrief}`;
+}
+
+function summarizeTaobaoHarvestStats(stats) {
+  const pageStats = Array.isArray(stats?.pageStats) ? stats.pageStats : [];
+  if (!pageStats.length) return "";
+  const total = pageStats.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const matched = pageStats.reduce((sum, item) => sum + Number(item.matched || 0), 0);
+  const skipped = sumSkipped(pageStats);
+  const pageBrief = pageStats
+    .slice(0, 5)
+    .map((item) => `第${item.page}页 ${item.total}原始/${item.matched}命中/跳过${formatSkipObject(item.skipped || {})}`)
+    .join("；");
+  return `翻看${pageStats.length}页，列表原始${total}个，基础规则命中${matched}个，跳过${formatSkipObject(skipped)}；明细 ${pageBrief}`;
+}
+
+function summarizeRejectReasons(items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  const counts = new Map();
+  for (const item of items) {
+    const reason = normalizeReason(item?.reason || item?.rejectReason || item?.selectedSkuRejectReason || item?.message || "未知原因");
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([reason, count]) => `${reason}×${count}`)
+    .join("；");
+}
+
+function sumSkipped(items) {
+  return items.reduce((acc, item) => addSkipped(acc, item.skipped || {}), {});
+}
+
+function addSkipped(left, right) {
+  const merged = { ...left };
+  for (const [key, value] of Object.entries(right || {})) {
+    merged[key] = (merged[key] || 0) + Number(value || 0);
+  }
+  return merged;
+}
+
+function formatSkipObject(skipped) {
+  const entries = Object.entries(skipped || {}).filter(([, value]) => Number(value || 0) > 0);
+  if (!entries.length) return "0";
+  return entries
+    .map(([key, value]) => `${translateSkipKey(key)}${value}`)
+    .join("、");
+}
+
+function translateSkipKey(key) {
+  const names = {
+    noProductId: "缺ID",
+    duplicate: "重复",
+    shopMismatch: "非本店",
+    brandMismatch: "非品牌",
+    nonDomestic: "非国内",
+    slowShipping: "非48小时",
+    lowSales: "销量不足",
+    overseasPlatform: "海外平台",
+    priceOutOfRange: "价格不符"
+  };
+  return names[key] || key;
+}
+
+function normalizeReason(reason) {
+  const text = String(reason || "未知原因").replace(/\s+/g, " ").trim();
+  if (!text) return "未知原因";
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text;
 }
 
 /**

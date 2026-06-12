@@ -146,7 +146,28 @@ for (const brand of brandQueue) {
         continue;
       }
 
-      const matches = buildQualifiedMatches(jd, tbResult.candidates || [], keyword);
+      const review = buildQualifiedMatches(jd, tbResult.candidates || [], keyword);
+      const matches = review.matches;
+      const reviewSummary = summarizeReviewRejections(review.rejections);
+      console.log(`[batch] 淘宝同款复核: 候选 ${tbResult.candidates?.length || 0}，达标 ${matches.length}，淘汰 ${review.rejections.length}${reviewSummary ? `，原因：${reviewSummary}` : ""}`);
+      addBatchLog("info", `batch taobao_review：brand=${brand} jd=${jd.productId} keyword=${keyword} 候选${tbResult.candidates?.length || 0} 达标${matches.length} 淘汰${review.rejections.length}${reviewSummary ? ` 原因=${reviewSummary}` : ""}`);
+      for (const example of sampleReviewRejections(review.rejections)) {
+        console.log(`[batch] 复核淘汰示例: ${example}`);
+      }
+      state.runs.push({
+        time: new Date().toISOString(),
+        action: "taobao_review",
+        brand,
+        jdProductId: jd.productId,
+        keyword,
+        ok: true,
+        candidateCount: tbResult.candidates?.length || 0,
+        matchedCount: matches.length,
+        rejectedCount: review.rejections.length,
+        rejectionSummary: reviewSummary,
+        examples: sampleReviewRejections(review.rejections, 3)
+      });
+      saveState(statePath, state);
       if (!matches.length) {
         console.log("[batch] 无利润达标同款。");
         await sleep(sleepMs);
@@ -213,21 +234,34 @@ process.exit(stopping ? 130 : 0);
 
 function buildQualifiedMatches(jd, taobaoCandidates, keyword) {
   const matches = [];
+  const rejections = [];
   const seenTaobao = new Set();
   for (const tb of taobaoCandidates) {
-    if (!tb?.productId || seenTaobao.has(tb.productId)) continue;
+    if (!tb?.productId) {
+      rejections.push(reviewReject(tb, "缺商品ID", "商品没有可追踪的淘宝ID"));
+      continue;
+    }
+    if (seenTaobao.has(tb.productId)) {
+      rejections.push(reviewReject(tb, "重复淘宝链接", "同一淘宝商品ID本轮已处理"));
+      continue;
+    }
     seenTaobao.add(tb.productId);
 
     const same = assessSameProductMatch(jd, tb, keyword);
     if (!same.matched || same.confidence < 0.5) {
+      rejections.push(reviewReject(tb, "同款不匹配", `${same.reason || "标题/SKU不匹配"}，置信度${Number(same.confidence || 0).toFixed(2)}`));
       continue;
     }
 
     const dosage = dosageCompatibility(jd, tb);
-    if (!dosage.compatible) continue;
+    if (!dosage.compatible) {
+      rejections.push(reviewReject(tb, "剂量不一致", dosage.reason));
+      continue;
+    }
 
     const compared = compareUnitPrice(jd, tb);
     if (!compared.canCompare || !compared.jd?.unitPrice || !compared.taobao?.unitPrice) {
+      rejections.push(reviewReject(tb, "单位价不可比", compared.reason || "无法同时解析京东和淘宝最小规格单价"));
       continue;
     }
 
@@ -236,7 +270,10 @@ function buildQualifiedMatches(jd, taobaoCandidates, keyword) {
       { ...tb, unitPrice: compared.taobao.unitPrice },
       strategy
     );
-    if (!evaluated.passed) continue;
+    if (!evaluated.passed) {
+      rejections.push(reviewReject(tb, "利润策略未过", evaluated.reason || "利润规则未通过"));
+      continue;
+    }
 
     matches.push({
       taobao: {
@@ -259,7 +296,38 @@ function buildQualifiedMatches(jd, taobaoCandidates, keyword) {
       }
     });
   }
-  return matches.sort((a, b) => b.profit.profitRate - a.profit.profitRate);
+  return {
+    matches: matches.sort((a, b) => b.profit.profitRate - a.profit.profitRate),
+    rejections
+  };
+}
+
+function reviewReject(tb, stage, reason) {
+  return {
+    productId: tb?.productId || "",
+    title: short(tb?.title || "", 52),
+    stage,
+    reason: String(reason || "未知原因")
+  };
+}
+
+function summarizeReviewRejections(rejections) {
+  if (!Array.isArray(rejections) || !rejections.length) return "";
+  const counts = new Map();
+  for (const item of rejections) {
+    const key = item.stage || "未知阶段";
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([stage, count]) => `${stage}${count}`)
+    .join("、");
+}
+
+function sampleReviewRejections(rejections, limit = 2) {
+  return (rejections || [])
+    .slice(0, limit)
+    .map((item) => `${item.stage}: ${item.title || item.productId || "无标题"} / ${short(item.reason, 80)}`);
 }
 
 function normalizeJdForSave(jd) {
@@ -313,6 +381,17 @@ function qualifiedRows() {
   const db = openSourcingDb({ dataDir });
   try {
     return db.listDedupedQualifiedResults(strategy.profit);
+  } finally {
+    db.close();
+  }
+}
+
+function addBatchLog(level, message) {
+  const db = openSourcingDb({ dataDir });
+  try {
+    db.addLog(null, level, message);
+  } catch {
+    // 日志失败不能影响批量任务续跑。
   } finally {
     db.close();
   }

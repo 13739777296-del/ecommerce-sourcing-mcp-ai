@@ -204,6 +204,8 @@ npm run batch:sourcing -- \
 
 批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。最终 `export_results` / `export_feishu` 返回的 `count` 小于目标数时，Agent 继续跑下一批品牌即可。
 
+排查批量任务时先看日志：`jd_harvest` 会记录买手店列表命中、跳过原因和详情页淘汰原因；`taobao_harvest` 会记录国内发货、48 小时、销量、价格等基础筛选摘要；批量脚本还会记录同款复核、剂量、单位价和利润策略的淘汰原因。
+
 `save_sourcing` 之后再用 `sourcing_list` 确认淘宝匹配是否已经写回库：
 ```json
 {

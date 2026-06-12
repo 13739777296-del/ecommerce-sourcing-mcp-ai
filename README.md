@@ -202,6 +202,7 @@ ecommerce_sourcing({ action: "sourcing_list", limit: 20 })
 ```bash
 npm run batch:sourcing -- \
   --target=100 \
+  --maxPendingReviews=30 \
   --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json \
   --maxShopsPerBrand=8 \
   --maxDetailPerShop=12 \
@@ -218,7 +219,7 @@ npm run batch:sourcing -- \
 { "brands": ["GNC", "Nature Made"] }
 ```
 
-批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。注意：批量脚本只负责采集候选并在 `$HOME/.ecommerce-sourcing-agent/review-tasks` 生成 AI 审核任务包，不自动裁决同款、SKU单位价或利润，也不自动保存淘宝匹配。`--target` 表示“已入库达标 + 待 AI 审核任务包”的总量，不表示脚本已自动入库 100 个。Agent 审核任务包后调用 `save_sourcing`，最终 `export_results` / `export_feishu` 返回的 `count` 小于目标数时，Agent 继续跑下一批品牌即可。
+批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。注意：批量脚本只负责采集候选并在 `$HOME/.ecommerce-sourcing-agent/review-tasks` 生成 AI 审核任务包，不自动裁决同款、SKU单位价或利润，也不自动保存淘宝匹配。`--target` 表示真正已经 `save_sourcing` 入库且利润达标的去重可用品数量；待 AI 审核任务包不计入 target。`--maxPendingReviews` 用来控制未审核任务包上限，达到后会暂停采集，Agent 审核任务包并调用 `save_sourcing` 后再继续跑下一批品牌。
 
 排查批量任务时先看日志：`jd_harvest` 会记录买手店列表命中、跳过原因和详情页淘汰原因；`taobao_harvest` 会记录国内发货、48 小时、销量、价格等基础筛选摘要；批量脚本会记录每个待 Agent 审核任务包的路径。
 

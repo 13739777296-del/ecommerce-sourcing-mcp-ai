@@ -25,6 +25,7 @@ const maxConsecutiveCommentRejectsPerShop = numberArg(args.maxConsecutiveComment
 const taobaoMaxCount = numberArg(args.taobaoMaxCount, 30);
 const taobaoMaxDetail = numberArg(args.taobaoMaxDetail, 8);
 const maxKeywordsPerJd = numberArg(args.maxKeywordsPerJd, 2);
+const maxPendingReviews = numberArg(args.maxPendingReviews, 30);
 const strategy = DEFAULT_STRATEGIES["no-source-arbitrage"];
 const ctx = { dataDir, config: { get: () => "" }, log: console };
 const sleepMs = numberArg(args.sleepMs, 1500);
@@ -43,7 +44,7 @@ process.on("SIGINT", () => {
 
 console.log(`[batch] dataDir=${dataDir}`);
 console.log(`[batch] reviewTasks=${reviewOutputDir}`);
-console.log(`[batch] brands=${brandQueue.length}, target=${target}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}, maxShopsPerBrand=${maxShopsPerBrand}, maxDetailPerShop=${maxDetailPerShop}`);
+console.log(`[batch] brands=${brandQueue.length}, target=${target}, maxPendingReviews=${maxPendingReviews}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}, maxShopsPerBrand=${maxShopsPerBrand}, maxDetailPerShop=${maxDetailPerShop}`);
 
 const initialCount = qualifiedCount();
 console.log(`[batch] 当前已达标可用品: ${initialCount}，待AI审核任务: ${pendingReviewCount(state)}`);
@@ -52,12 +53,16 @@ for (const fingerprint of qualifiedFingerprints()) {
 }
 saveState(statePath, state);
 
-let currentCount = initialCount + pendingReviewCount(state);
+let currentCount = initialCount;
 let scannedBrands = 0;
 
 for (const brand of brandQueue) {
   if (stopping) break;
   if (currentCount >= target) break;
+  if (pendingReviewCount(state) >= maxPendingReviews) {
+    console.log(`[batch] 待AI审核任务已达 ${pendingReviewCount(state)}/${maxPendingReviews}，暂停采集。请Agent先审核任务包并调用save_sourcing。`);
+    break;
+  }
   if (brandLimit > 0 && scannedBrands >= brandLimit) break;
   if (state.completedBrands.includes(brand)) continue;
 
@@ -104,6 +109,11 @@ for (const brand of brandQueue) {
 
   for (const jd of jdResult.candidates || []) {
     if (stopping || currentCount >= target) break;
+    if (pendingReviewCount(state) >= maxPendingReviews) {
+      console.log(`[batch] 待AI审核任务已达 ${pendingReviewCount(state)}/${maxPendingReviews}，暂停当前品牌后续淘宝采集。`);
+      stopping = true;
+      break;
+    }
     if (!jd?.productId) continue;
     const productFingerprint = buildJdProductFingerprint(jd);
     if (state.completedJdProductIds.includes(jd.productId)) continue;
@@ -178,7 +188,7 @@ for (const brand of brandQueue) {
       state.pendingReviewJdProductIds.push(jd.productId);
       reviewTaskGenerated = true;
       saveState(statePath, state);
-      currentCount = qualifiedCount() + pendingReviewCount(state);
+      currentCount = qualifiedCount();
 
       await sleep(sleepMs);
     }
@@ -189,9 +199,9 @@ for (const brand of brandQueue) {
     }
   }
 
-  currentCount = qualifiedCount() + pendingReviewCount(state);
+  currentCount = qualifiedCount();
   if (currentCount === beforeCount) {
-    console.log(`[batch] 品牌 ${brand} 本轮无新增达标品或待审核任务。`);
+    console.log(`[batch] 品牌 ${brand} 本轮无新增已达标可用品。待AI审核任务: ${pendingReviewCount(state)}`);
   }
   state.completedBrands.push(brand);
   state.currentBrand = "";

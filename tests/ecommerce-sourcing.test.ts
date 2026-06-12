@@ -1009,12 +1009,15 @@ describe("ecommerce sourcing core", () => {
   it("returns batch sourcing guidance for calling Agents", async () => {
     const dataDir = tempDir();
     const result = await sourcingExecute({ action: "batch_guide" }, testContext(dataDir));
-    const guide = result.guide as { command: string; dedupe: string[] };
+    const guide = result.guide as { command: string; dedupe: string[]; reviewTasks: string[] };
 
     expect(result.ok).toBe(true);
     expect(guide.command).toContain("npm run batch:sourcing");
     expect(guide.command).toContain("--maxShopsPerBrand=8");
+    expect(guide.command).toContain("--maxPendingReviews=30");
     expect(guide.dedupe.join(" ")).toContain("最终去重");
+    expect(guide.reviewTasks.join(" ")).toContain("待AI审核任务不计入target");
+    expect(guide.reviewTasks.join(" ")).not.toContain("已达标可用品 + 待AI审核任务包");
   });
 });
 

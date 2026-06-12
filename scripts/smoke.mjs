@@ -1,30 +1,20 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execute as status } from "../tools/status.js";
-import { execute as checkAccounts } from "../tools/check-accounts.js";
+import { executeMcpTool } from "../mcp/runtime.mjs";
 
-const dataDir = process.env.ECOMMERCE_SOURCING_DATA_DIR || mkdtempSync(join(tmpdir(), "ecommerce-sourcing-smoke-"));
-const ctx = {
-  dataDir,
-  pluginId: "ecommerce-sourcing",
-  config: {
-    get() {
-      return "";
-    }
-  },
-  log: {
-    info: console.log,
-    warn: console.warn,
-    error: console.error
-  }
-};
+const originalDataDir = process.env.ECOMMERCE_SOURCING_DATA_DIR;
+const dataDir = originalDataDir || mkdtempSync(join(tmpdir(), "ecommerce-sourcing-smoke-"));
+process.env.ECOMMERCE_SOURCING_DATA_DIR = dataDir;
 
 try {
-  console.log(await status({ limit: 3 }, ctx));
-  console.log(await checkAccounts({ platform: "all", probeLogin: false }, ctx));
+  console.log(await executeMcpTool("ecommerce_sourcing", { action: "usage_guide" }));
+  console.log(await executeMcpTool("ecommerce_sourcing", { action: "warmup" }));
 } finally {
-  if (!process.env.ECOMMERCE_SOURCING_DATA_DIR) {
+  if (originalDataDir) {
+    process.env.ECOMMERCE_SOURCING_DATA_DIR = originalDataDir;
+  } else {
+    delete process.env.ECOMMERCE_SOURCING_DATA_DIR;
     rmSync(dataDir, { recursive: true, force: true });
   }
 }

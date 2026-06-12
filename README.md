@@ -1,49 +1,66 @@
-# 电商选品MCP - AI驱动（All-in-One）
+# 电商选品 MCP - AI 驱动
 
-> 一个MCP工具，搞定所有电商选品场景。京东→淘宝→比价→输出可用品。
+> 一个 MCP 工具，给通用 Agent 增加电商选品能力：京东找候选品、淘宝找供货、单位价比价、结果入库和导出。
 
 ## 核心能力
 
-**一条指令，端到端自动化：**
+**推荐由 Agent 分段执行：**
 ```
 ecommerce_sourcing({ 
-  action: "full_selection",
-  keyword: "辅酶Q10",
+  action: "jd_harvest",
+  brand: "GNC",
+  targetCount: 5,
   strategyId: "no-source-arbitrage"
 })
 ```
 
-自动完成：
-1. 京东搜索 + 提取列表
-2. 按策略筛选（店铺类型/销量/价格）
-3. 进入详情页提取SKU/评论/品牌
-4. 计算最小规格单价（每片/每克/每毫升）
-5. 淘宝以图搜图
-6. 提取淘宝供货 + 筛选（发货地/发货时效/已售）
-7. 比价 + 计算利润率
-8. 输出符合条件的可用品
+推荐工作流：
+1. `jd_harvest`：先用“品牌 + 买手店”收集买手店名，再只搜买手店名，进入详情页复核评论数、SKU、主图和价格，并先入库。
+2. 调用方 Agent：从京东候选标题里提取品牌名 + 核心品名，去掉规格、瓶数、营销词。
+3. `taobao_harvest`：用 Agent 清洗后的关键词逐品去淘宝找供货，筛国内发货、48 小时内发货、销量门槛。
+4. 调用方 Agent：做同款复核、SKU 单位价比价、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。
+5. `save_sourcing`：把京东品和匹配的淘宝货源写回本地库。
+6. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
+7. `export_results` / `export_feishu`：导出 CSV 或飞书表格。
 
-## 一个MCP，所有功能
+## 一个 MCP，所有功能
 
 | Action | 用途 |
 |--------|------|
+| **初始化** | |
+| `usage_guide` | 查看 Agent 使用手册 |
+| `bootstrap` | 新电脑安装本机 worker 引导 |
+| `warmup` | 只读账号状态预检 |
 | **策略库** | |
 | `strategy_templates` | 查看内置策略模板 |
 | `strategy_list` | 列出所有策略 |
 | `strategy_get` | 查看策略详情 |
+| `strategy_save` | 保存自定义策略 |
+| **账号池** | |
+| `account_list` | 列出账号 |
+| `account_add` | 新增账号 profile |
+| `account_login` | 打开正式 Chrome 登录页 |
+| `account_check` | 检查登录态 |
+| `account_remove` | 删除账号记录 |
 | **京东** | |
 | `jd_search` | 搜索 |
 | `jd_extract` | 提取列表 |
 | `jd_detail` | 提取详情（模拟人类点击） |
 | `jd_search_filter` | 搜索+按策略筛选 |
+| `jd_harvest` | 推荐：京东品牌候选采集并入库 |
 | **淘宝** | |
 | `taobao_search` | 关键词搜索 |
 | `taobao_search_image` | 以图搜图（推荐） |
 | `taobao_extract` | 提取列表 |
-| **完整自动化** | |
-| `full_selection` | 单个关键词完整选品 |
-| `batch_selection` | 批量关键词（目标500个品） |
-| `close` | 关闭浏览器 |
+| `taobao_harvest` | 推荐：淘宝逐品供货采集；会把选中 SKU 明显不匹配的候选放入 rejected |
+| **数据** | |
+| `save_sourcing` | 保存京东品和淘宝匹配 |
+| `sourcing_list` | 查看已入库结果和淘宝匹配数量 |
+| `logs` | 查看最近 MCP 操作日志 |
+| `export_results` | 导出 CSV |
+| `bind_feishu` | 绑定飞书 |
+| `export_feishu` | 导出飞书多维表格；主列会初始化为“序号”，并清理默认字段和默认空行 |
+| `close` | 兼容旧调用；默认保持浏览器会话打开 |
 
 ## 内置策略
 
@@ -54,7 +71,7 @@ ecommerce_sourcing({
   "platforms": {
     "jd": {
       "shopTypes": { "include": ["buyer"] },  // 只要买手店
-      "minSales": 2
+      "minComments": 2
     },
     "taobao": {
       "shipFrom": "domestic",    // 国内发货
@@ -64,25 +81,32 @@ ecommerce_sourcing({
   },
   "profit": {
     "minRate": 0.35,  // 35%
-    "maxRate": 0.60   // 60%
+    "maxRate": 0.60,  // 60%，超过可能是假货/异常货源
+    "minAmount": 20   // 最低单件利润
+  },
+  "riskControl": {
+    "bannedBrands": [
+      { "name": "斯维诗", "aliases": ["Swisse"] },
+      { "name": "益节", "aliases": ["Move Free", "MoveFree"] },
+      { "name": "脉拓", "aliases": ["MegaRed"] },
+      { "name": "安利", "aliases": ["Amway", "纽崔莱", "NUTRILITE"] },
+      { "name": "优必欧", "aliases": ["UBIO"] },
+      { "name": "汤普森", "aliases": ["Thompsons", "Thompson's"] },
+      { "name": "佰澳朗德", "aliases": ["BioIsland", "Bio Island"] },
+      { "name": "澳佳宝", "aliases": ["Blackmores"] }
+    ]
   }
 }
 ```
 
-### 2. 品牌优品
-只要旗舰店/海外店，高销量高质量
-
-### 3. 低价猎手
-超低价高销量商品
-
 ## 技术亮点
 
-### AI绕过反爬
+### 保守浏览器自动化
 - ✅ 正式Chrome（不是Chromium）
 - ✅ 用户已登录Cookie
-- ✅ 模拟人类：随机停顿/打字速度/滚动/hover
-- ✅ 真实操作搜索框（不构造URL）
-- ✅ 点击商品图片进详情（不直跳）
+- ✅ 小量、低频、可暂停
+- ✅ 遇到验证码、安全验证、访问频繁、登录失效时暂停并返回给 Agent
+- ✅ 保持账号 profile，不清空、不重建、不默认杀 Chrome 进程
 
 ### 智能DOM解析
 - 不依赖固定class（适应动态哈希）
@@ -98,58 +122,75 @@ ecommerce_sourcing({
 
 ## 使用示例
 
-### Agent调用（Claude Code）
+### Agent 调用（Claude Code）
 
 ```typescript
-// 1. 完整选品（单个关键词）
+// 1. 推荐：京东先采集并入库候选
 ecommerce_sourcing({
-  action: "full_selection",
-  keyword: "辅酶Q10",
-  strategyId: "no-source-arbitrage",
-  maxJdCandidates: 10,
-  maxTaobaoCandidatesPerJd: 10
+  action: "jd_harvest",
+  brand: "GNC",
+  targetCount: 5,
+  strategyId: "no-source-arbitrage"
 })
 
-// 2. 批量选品（目标500个品）
+// 2. Agent 从京东标题提取品牌+核心品名后，逐个淘宝找货源
 ecommerce_sourcing({
-  action: "batch_selection",
-  keywords: ["辅酶Q10", "鱼油", "维生素D", ...],
+  action: "taobao_harvest",
+  keyword: "GNC 辅酶Q10",
   strategyId: "no-source-arbitrage",
-  targetCount: 500
+  minSales: 10,
+  requireDomestic: true,
+  require48h: true
 })
 
-// 3. 单步操作（调试用）
-ecommerce_sourcing({ action: "jd_search_filter", keyword: "辅酶Q10" })
+// 3. Agent 完成同款复核、单位价和利润计算后，把匹配结果写回库
+ecommerce_sourcing({
+  action: "save_sourcing",
+  jdProduct: { "productId": "jd-xxx", "title": "...", "price": 398 },
+  taobaoMatches: [{ "taobao": { "productId": "tb-xxx", "price": 216 }, "profit": { "profitRate": 0.45, "profitAmount": 182 } }]
+})
+
+// 4. 导出前确认淘宝匹配已经入库
+ecommerce_sourcing({ action: "sourcing_list", limit: 20 })
 ```
 
-### 返回结果示例
+### 分段返回结果示例
 
+`jd_harvest` 会先把京东候选保存到本地库，并把下一步要给 Agent 处理的任务返回出来：
 ```json
 {
   "ok": true,
-  "matchedCount": 3,
-  "matched": [
+  "action": "jd_harvest",
+  "candidateCount": 2,
+  "database": {
+    "savedCount": 2,
+    "saveErrors": []
+  },
+  "suggestedTaobaoTasks": [
     {
-      "jd": {
-        "title": "辅酶Q10软胶囊 60粒",
-        "price": "100",
-        "unitPrice": 1.67,
-        "unit": "粒",
-        "shop": "某买手店",
-        "shopType": "buyer"
-      },
-      "taobao": {
-        "title": "辅酶Q10 60粒",
-        "price": "60",
-        "unitPrice": 1.0,
-        "unit": "粒",
-        "shipFrom": "浙江",
-        "shipHours": 24
-      },
-      "profit": {
-        "rate": 0.67,
-        "amount": 40
-      }
+      "jdProductId": "jd-xxx",
+      "jdTitle": "GNC 辅酶Q10 150mg 60粒",
+      "searchKeywordCandidates": ["GNC 辅酶Q10 软胶囊", "辅酶Q10 软胶囊"]
+    }
+  ]
+}
+```
+
+`save_sourcing` 之后再用 `sourcing_list` 确认淘宝匹配是否已经写回库：
+```json
+{
+  "ok": true,
+  "action": "sourcing_list",
+  "count": 1,
+  "items": [
+    {
+      "jdProductId": "jd-xxx",
+      "jdTitle": "GNC 辅酶Q10 150mg 60粒",
+      "jdPrice": 398,
+      "jdUnitPrice": 6.6333,
+      "profitAmount": 182,
+      "profitRate": 0.4573,
+      "taobaoMatchCount": 1
     }
   ]
 }
@@ -184,30 +225,10 @@ node mcp/local-worker.mjs
 ## 测试
 
 ```bash
-npm test                          # 所有测试
-node tests/test-all-in-one.mjs    # All-in-One工具测试
-node tests/test-strategy.mjs      # 策略引擎
-node tests/test-full-flow.mjs     # 完整流程
+npm run typecheck                 # 类型检查
+npm test                          # 本地单元测试和 MCP 协议测试，不打开京东/淘宝
+npm run smoke                     # 安全烟测：usage_guide + warmup
 ```
-
-## 商业模式
-
-- **核心引擎开源** → 吸引用户
-- **服务器托管 + 多账号管理 = 收费SaaS**
-- Agent装MCP → 调用云端服务 → 按用量计费
-
-## 路线图
-
-- [x] 京东AI控制器
-- [x] 淘宝AI控制器（含以图搜图）
-- [x] 通用策略引擎
-- [x] 最小规格单价计算
-- [x] 完整选品流程
-- [x] All-in-One MCP工具
-- [ ] 商品截图保存
-- [ ] 数据库持久化（匹配的淘宝链接）
-- [ ] Web控制台
-- [ ] 批量账号管理
 
 ## License
 

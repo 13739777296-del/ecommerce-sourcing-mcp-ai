@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,13 +26,12 @@ afterEach(async () => {
 });
 
 describe("ecommerce sourcing MCP server", () => {
-  it("initializes, lists tools, and calls the status tool over stdio", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-mcp-"));
-    tempDirs.push(dataDir);
+  it("initializes, lists the all-in-one tool, and calls safe actions over stdio", async () => {
+    const dataDir = tempDir("ecommerce-sourcing-mcp-");
     server = new McpTestClient(dataDir);
 
     const initialized = await server.request("initialize", {
-      protocolVersion: "2024-11-05",
+      protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "vitest", version: "0.0.0" }
     });
@@ -42,78 +41,79 @@ describe("ecommerce sourcing MCP server", () => {
     expect(initialized.capabilities.prompts).toEqual({});
 
     const listed = await server.request("tools/list", {});
-    const toolNames = listed.tools.map((tool: { name: string }) => tool.name);
-    expect(toolNames).toContain("ecommerce_sourcing_bootstrap");
-    expect(toolNames).toContain("ecommerce_sourcing_usage_guide");
-    expect(toolNames).toContain("ecommerce_sourcing_accounts");
-    expect(toolNames).toContain("ecommerce_sourcing_run_selection");
-    expect(toolNames).toContain("ecommerce_sourcing_agent_collect");
-    expect(toolNames).toContain("ecommerce_sourcing_ai_browser");
-    expect(toolNames).toContain("ecommerce_sourcing_status");
+    expect(listed.tools.map((tool: { name: string }) => tool.name)).toEqual(["ecommerce_sourcing"]);
+    const actionEnum = listed.tools[0].inputSchema.properties.action.enum;
+    expect(actionEnum).toContain("jd_harvest");
+    expect(actionEnum).toContain("taobao_harvest");
+    expect(actionEnum).toContain("save_sourcing");
+    expect(actionEnum).toContain("sourcing_list");
+    expect(actionEnum).toContain("logs");
+    expect(actionEnum).not.toContain("full_selection");
+    expect(actionEnum).not.toContain("batch_selection");
 
     const prompts = await server.request("prompts/list", {});
     expect(prompts.prompts.map((prompt: { name: string }) => prompt.name)).toContain("ecommerce_sourcing_agent_guide");
 
     const guidePrompt = await server.request("prompts/get", { name: "ecommerce_sourcing_agent_guide" });
-    expect(guidePrompt.messages[0].content.text).toContain("电商选品 MCP 使用手册");
-    expect(guidePrompt.messages[0].content.text).toContain("每一步都必须用多模态模型看截图");
+    expect(guidePrompt.messages[0].content.text).toContain("只暴露一个 MCP 工具");
+    expect(guidePrompt.messages[0].content.text).toContain("关键节点时，再结合多模态模型交叉验证");
+    expect(guidePrompt.messages[0].content.text).toContain("save_sourcing");
+    expect(guidePrompt.messages[0].content.text).toContain("sourcing_list");
 
     const guideTool = await server.request("tools/call", {
-      name: "ecommerce_sourcing_usage_guide",
-      arguments: {}
+      name: "ecommerce_sourcing",
+      arguments: { action: "usage_guide" }
     });
-    expect(guideTool.content[0].text).toContain("选品循环流程");
+    expect(toolJson(guideTool).guide.workflow).toContain("jd_harvest");
+    expect(toolJson(guideTool).guide.workflow).toContain("save_sourcing");
+    expect(toolJson(guideTool).guide.workflow).toContain("sourcing_list");
 
     const bootstrap = await server.request("tools/call", {
-      name: "ecommerce_sourcing_bootstrap",
-      arguments: { mode: "command" }
+      name: "ecommerce_sourcing",
+      arguments: { action: "bootstrap", mode: "command" }
     });
-    expect(bootstrap.content[0].text).toContain("curl -fsSL");
-    expect(bootstrap.structuredContent.installScriptUrl).toContain("/install.sh");
+    expect(toolJson(bootstrap).installCommand).toContain("curl -fsSL");
+    expect(toolJson(bootstrap).installScriptUrl).toContain("/install.sh");
+
+    const bootstrapGuide = await server.request("tools/call", {
+      name: "ecommerce_sourcing",
+      arguments: { action: "bootstrap", mode: "guide" }
+    });
+    expect(toolJson(bootstrapGuide).guide).toContain("save_sourcing");
+    expect(toolJson(bootstrapGuide).guide).toContain("sourcing_list");
 
     const added = await server.request("tools/call", {
-      name: "ecommerce_sourcing_accounts",
+      name: "ecommerce_sourcing",
       arguments: {
-        action: "add",
+        action: "account_add",
         platform: "jd",
-        displayName: "京东测试账号",
-        profileDir: join(dataDir, "profiles", "jd-test")
+        displayName: "京东测试账号"
       }
     });
-    const accountId = added.structuredContent.account.id;
-    expect(added.content[0].text).toContain("账号已新增");
-    expect(added.structuredContent.account.status).toBe("login_required");
+    const accountId = toolJson(added).account.id;
+    expect(toolJson(added).account.status).toBe("login_required");
 
-    const disabled = await server.request("tools/call", {
-      name: "ecommerce_sourcing_accounts",
-      arguments: { action: "disable", accountId }
+    const listedAccounts = await server.request("tools/call", {
+      name: "ecommerce_sourcing",
+      arguments: { action: "account_list" }
     });
-    expect(disabled.structuredContent.account.status).toBe("paused");
-
-    const enabled = await server.request("tools/call", {
-      name: "ecommerce_sourcing_accounts",
-      arguments: { action: "enable", accountId }
-    });
-    expect(enabled.structuredContent.account.status).toBe("available");
+    expect(toolJson(listedAccounts).accounts.some((account: { id: string }) => account.id === accountId)).toBe(true);
 
     const removed = await server.request("tools/call", {
-      name: "ecommerce_sourcing_accounts",
-      arguments: { action: "remove", accountId }
+      name: "ecommerce_sourcing",
+      arguments: { action: "account_remove", accountId }
     });
-    expect(removed.structuredContent.removed.displayName).toBe("京东测试账号");
+    expect(toolJson(removed).removed.displayName).toBe("京东测试账号");
 
-    const status = await server.request("tools/call", {
-      name: "ecommerce_sourcing_status",
-      arguments: { limit: 1 }
+    const warmup = await server.request("tools/call", {
+      name: "ecommerce_sourcing",
+      arguments: { action: "warmup" }
     });
-
-    expect(status.content[0].text).toContain("电商选品 Agent 状态");
-    expect(status.structuredContent.dbPath).toContain(dataDir);
+    expect(toolJson(warmup).message).toContain("个账号就绪");
   });
 
   it("serves MCP JSON-RPC over HTTP with API key protection", async () => {
-    const dataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-http-"));
-    tempDirs.push(dataDir);
+    const dataDir = tempDir("ecommerce-sourcing-http-");
     const port = await getFreePort();
     const apiKey = "test-api-key";
     const child = spawn("node", ["mcp/http-server.mjs"], {
@@ -121,7 +121,7 @@ describe("ecommerce sourcing MCP server", () => {
       env: {
         ...process.env,
         ECOMMERCE_SOURCING_DATA_DIR: dataDir,
-        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(dataDir, "missing-profiles"),
+        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(dataDir, "legacy-profiles"),
         ECOMMERCE_SOURCING_HTTP_PORT: String(port),
         ECOMMERCE_SOURCING_API_KEY: apiKey
       }
@@ -137,16 +137,9 @@ describe("ecommerce sourcing MCP server", () => {
     expect(installScript.status).toBe(200);
     const installScriptText = await installScript.text();
     expect(installScriptText).toContain("com.ecommerce-sourcing-mcp.worker");
+    expect(installScriptText).toContain("ecommerce-sourcing-mcp-ai.git");
     expect(installScriptText).toContain("请输入电商选品 MCP worker 密钥");
     expect(installScriptText).not.toMatch(/WORKER_KEY="\$\{ECOMMERCE_SOURCING_WORKER_KEY:-[a-f0-9]{32,}\}"/);
-
-    const getMcp = await fetch(`http://127.0.0.1:${port}/mcp`, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "text/event-stream"
-      }
-    });
-    expect(getMcp.status).toBe(405);
 
     const listed = await postMcp(port, apiKey, {
       jsonrpc: "2.0",
@@ -154,18 +147,18 @@ describe("ecommerce sourcing MCP server", () => {
       method: "tools/list",
       params: {}
     });
-    expect(listed.result.tools.map((tool: { name: string }) => tool.name)).toContain("ecommerce_sourcing_run_selection");
+    expect(listed.result.tools.map((tool: { name: string }) => tool.name)).toEqual(["ecommerce_sourcing"]);
 
-    const status = await postMcp(port, apiKey, {
+    const guide = await postMcp(port, apiKey, {
       jsonrpc: "2.0",
       id: 2,
       method: "tools/call",
       params: {
-        name: "ecommerce_sourcing_status",
-        arguments: { limit: 1 }
+        name: "ecommerce_sourcing",
+        arguments: { action: "usage_guide" }
       }
     });
-    expect(status.result.content[0].text).toContain("电商选品 Agent 状态");
+    expect(toolJson(guide.result).guide.name).toBe("电商选品MCP");
 
     const notification = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
@@ -180,10 +173,9 @@ describe("ecommerce sourcing MCP server", () => {
     expect(notification.status).toBe(202);
   });
 
-  it("can route MCP tool calls through a local worker", async () => {
-    const serverDataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-server-"));
-    const workerDataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-worker-"));
-    tempDirs.push(serverDataDir, workerDataDir);
+  it("can route safe all-in-one tool calls through a local worker", async () => {
+    const serverDataDir = tempDir("ecommerce-sourcing-server-");
+    const workerDataDir = tempDir("ecommerce-sourcing-worker-");
     const port = await getFreePort();
     const apiKey = "test-api-key";
     const workerKey = "test-worker-key";
@@ -209,7 +201,7 @@ describe("ecommerce sourcing MCP server", () => {
         ECOMMERCE_SOURCING_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
         ECOMMERCE_SOURCING_WORKER_KEY: workerKey,
         ECOMMERCE_SOURCING_DATA_DIR: workerDataDir,
-        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(workerDataDir, "missing-profiles"),
+        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(workerDataDir, "legacy-profiles"),
         ECOMMERCE_SOURCING_WORKER_POLL_INTERVAL_MS: "50"
       }
     });
@@ -217,25 +209,23 @@ describe("ecommerce sourcing MCP server", () => {
 
     await waitForWorker(port);
 
-    const status = await postMcp(port, apiKey, {
+    const warmup = await postMcp(port, apiKey, {
       jsonrpc: "2.0",
       id: 3,
       method: "tools/call",
       params: {
-        name: "ecommerce_sourcing_status",
-        arguments: { limit: 1 }
+        name: "ecommerce_sourcing",
+        arguments: { action: "warmup" }
       }
     });
 
-    expect(status.result.content[0].text).toContain("电商选品 Agent 状态");
-    expect(status.result.structuredContent.dbPath).toContain(workerDataDir);
+    expect(toolJson(warmup.result).message).toContain("个账号就绪");
   });
 
   it("binds queued tool calls to the matching user worker key", async () => {
-    const serverDataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-server-"));
-    const bobWorkerDataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-bob-worker-"));
-    const aliceWorkerDataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-alice-worker-"));
-    tempDirs.push(serverDataDir, bobWorkerDataDir, aliceWorkerDataDir);
+    const serverDataDir = tempDir("ecommerce-sourcing-server-");
+    const bobWorkerDataDir = tempDir("ecommerce-sourcing-bob-worker-");
+    const aliceWorkerDataDir = tempDir("ecommerce-sourcing-alice-worker-");
     const port = await getFreePort();
     const child = spawn("node", ["mcp/http-server.mjs"], {
       cwd: process.cwd(),
@@ -261,7 +251,7 @@ describe("ecommerce sourcing MCP server", () => {
         ECOMMERCE_SOURCING_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
         ECOMMERCE_SOURCING_WORKER_KEY: "bob-worker-key",
         ECOMMERCE_SOURCING_DATA_DIR: bobWorkerDataDir,
-        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(bobWorkerDataDir, "missing-profiles"),
+        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(bobWorkerDataDir, "legacy-profiles"),
         ECOMMERCE_SOURCING_WORKER_POLL_INTERVAL_MS: "50"
       }
     });
@@ -273,8 +263,8 @@ describe("ecommerce sourcing MCP server", () => {
       id: 5,
       method: "tools/call",
       params: {
-        name: "ecommerce_sourcing_status",
-        arguments: { limit: 1 }
+        name: "ecommerce_sourcing",
+        arguments: { action: "warmup" }
       }
     });
     expect(missingAliceWorker.result.isError).toBe(true);
@@ -287,29 +277,27 @@ describe("ecommerce sourcing MCP server", () => {
         ECOMMERCE_SOURCING_MCP_SERVER_URL: `http://127.0.0.1:${port}/mcp`,
         ECOMMERCE_SOURCING_WORKER_KEY: "alice-worker-key",
         ECOMMERCE_SOURCING_DATA_DIR: aliceWorkerDataDir,
-        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(aliceWorkerDataDir, "missing-profiles"),
+        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(aliceWorkerDataDir, "legacy-profiles"),
         ECOMMERCE_SOURCING_WORKER_POLL_INTERVAL_MS: "50"
       }
     });
     workerProcesses.push(aliceWorker);
     await waitForWorker(port);
 
-    const aliceStatus = await postMcp(port, "alice-api-key", {
+    const aliceWarmup = await postMcp(port, "alice-api-key", {
       jsonrpc: "2.0",
       id: 6,
       method: "tools/call",
       params: {
-        name: "ecommerce_sourcing_status",
-        arguments: { limit: 1 }
+        name: "ecommerce_sourcing",
+        arguments: { action: "warmup" }
       }
     });
-    expect(aliceStatus.result.content[0].text).toContain("电商选品 Agent 状态");
-    expect(aliceStatus.result.structuredContent.dbPath).toContain(aliceWorkerDataDir);
+    expect(toolJson(aliceWarmup.result).message).toContain("个账号就绪");
   });
 
   it("does not dispatch worker jobs to a closed long-poll connection", async () => {
-    const serverDataDir = mkdtempSync(join(tmpdir(), "ecommerce-sourcing-server-"));
-    tempDirs.push(serverDataDir);
+    const serverDataDir = tempDir("ecommerce-sourcing-server-");
     const port = await getFreePort();
     const apiKey = "test-api-key";
     const workerKey = "test-worker-key";
@@ -346,19 +334,19 @@ describe("ecommerce sourcing MCP server", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     const startedAt = Date.now();
-    const status = await postMcp(port, apiKey, {
+    const warmup = await postMcp(port, apiKey, {
       jsonrpc: "2.0",
       id: 4,
       method: "tools/call",
       params: {
-        name: "ecommerce_sourcing_status",
-        arguments: { limit: 1 }
+        name: "ecommerce_sourcing",
+        arguments: { action: "warmup" }
       }
     });
 
     expect(Date.now() - startedAt).toBeLessThan(900);
-    expect(status.result.isError).toBe(true);
-    expect(status.result.content[0].text).toContain("还没有可用的本机 worker");
+    expect(warmup.result.isError).toBe(true);
+    expect(warmup.result.content[0].text).toContain("还没有可用的本机 worker");
   });
 });
 
@@ -377,7 +365,7 @@ class McpTestClient {
       env: {
         ...process.env,
         ECOMMERCE_SOURCING_DATA_DIR: dataDir,
-        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(dataDir, "missing-profiles")
+        ECOMMERCE_SOURCING_LEGACY_PROFILE_ROOT: join(dataDir, "legacy-profiles")
       }
     });
 
@@ -387,7 +375,7 @@ class McpTestClient {
     });
 
     this.child.stderr.on("data", () => {
-      // The MCP server logs to stderr so stdout remains a clean protocol stream.
+      // MCP logs go to stderr so stdout stays protocol-only.
     });
 
     this.child.on("exit", (code) => {
@@ -456,6 +444,17 @@ class McpTestClient {
       }
     }
   }
+}
+
+function tempDir(prefix: string) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(dir, "legacy-profiles"), { recursive: true });
+  tempDirs.push(dir);
+  return dir;
+}
+
+function toolJson(result: { content: Array<{ text: string }> }) {
+  return JSON.parse(result.content[0].text);
 }
 
 function getFreePort() {

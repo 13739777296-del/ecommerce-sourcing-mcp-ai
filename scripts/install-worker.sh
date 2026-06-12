@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="${ECOMMERCE_SOURCING_PROJECT_DIR:-$HOME/开发/电商选品MCP}"
-REPO_URL="${ECOMMERCE_SOURCING_REPO_URL:-https://github.com/13739777296-del/ecommerce-sourcing-mcp.git}"
+PROJECT_DIR="${ECOMMERCE_SOURCING_PROJECT_DIR:-$HOME/.ecommerce-sourcing-mcp/runtime}"
+REPO_URL="${ECOMMERCE_SOURCING_REPO_URL:-https://github.com/13739777296-del/ecommerce-sourcing-mcp-ai.git}"
 SERVER_URL="${ECOMMERCE_SOURCING_MCP_SERVER_URL:-http://111.228.45.180/ecommerce-sourcing-mcp/mcp}"
 WORKER_KEY="${ECOMMERCE_SOURCING_WORKER_KEY:-}"
 DATA_DIR="${ECOMMERCE_SOURCING_DATA_DIR:-$HOME/.ecommerce-sourcing-agent}"

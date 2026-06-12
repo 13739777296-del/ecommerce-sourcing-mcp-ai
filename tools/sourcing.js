@@ -4,20 +4,22 @@
  * 一个MCP工具，多个action，覆盖所有场景：
  * - 策略库管理
  * - 单步操作（搜索/提取/详情）
- * - 完整自动化选品
+ * - 分段 Agent 选品
  */
 
-import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, closeAiSession, closeAiSessionsByPlatform, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
+import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
 import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus } from "../lib/accounts.js";
-import { evaluateJdProductByStrategy, DEFAULT_STRATEGIES } from "../lib/strategy-engine.js";
-import { fullSelectionFlow, batchSelection } from "../lib/full-selection.js";
+import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
+import { buildTaobaoSearchKeywords, extractBrand } from "../lib/logic.js";
+import { calculateUnitPrice } from "../lib/unit-price.js";
 
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
 import { mkdirSync } from "node:fs";
-import { exportToFeishu, bindFeishu, sendFeishuMsg, startFeishuChannel, readFeishuMsgs, stopFeishuChannel } from "../lib/feishu.js";
+import { exportToFeishu, bindFeishu, sendFeishuMsg, startFeishuChannel, readFeishuMsgs } from "../lib/feishu.js";
+import { buildBootstrapGuide, buildWorkerInstallCommand, installScriptUrl } from "../lib/bootstrap-guide.js";
 
-export const description = "电商选品All-in-One工具。支持：策略库管理、单步操作（搜索/提取/详情）、完整自动化选品（京东→淘宝→比价）。一个MCP搞定所有场景。";
+export const description = "电商选品All-in-One工具。支持：账号池、策略库、京东候选入库、淘宝供货采集、结果保存、日志和导出。推荐由 Agent 分段执行。";
 
 /**
  * MCP入口：runtime 调用的是 execute(args, ctx)。
@@ -25,7 +27,11 @@ export const description = "电商选品All-in-One工具。支持：策略库管
  */
 export async function execute(args, ctx) {
   const db = openSourcingDb(ctx);
-  return handler(ctx, db, args || {});
+  try {
+    return await handler(ctx, db, args || {});
+  } finally {
+    db.close();
+  }
 }
 
 export const parameters = {
@@ -34,21 +40,20 @@ export const parameters = {
     action: {
       type: "string",
       enum: [
-        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide",
+        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "bootstrap",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
-        "export_results", "export_feishu", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
-        "full_selection", "batch_selection",
+        "sourcing_list", "logs", "export_results", "export_feishu", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "close"
       ],
       description: `操作类型：
         策略库: strategy_list/get/save/templates
         京东单步: jd_search/extract/detail/search_filter
-        京东选品(推荐): jd_harvest —— 搜"品牌+买手店"→翻页拉买手店品→进详情拿评价→筛评价>2
+        京东选品(推荐): jd_harvest —— 搜"品牌+买手店"收集买手店名→只搜店名→进详情拿评价→筛评价>=策略门槛
         淘宝单步: taobao_search/search_image/extract
-        完整流程: full_selection (单个关键词), batch_selection (批量)
+        数据: save_sourcing/sourcing_list/logs/export_results/export_feishu
         关闭: close`
     },
     keyword: {
@@ -65,6 +70,12 @@ export const parameters = {
       enum: ["jd", "taobao"],
       default: "jd"
     },
+    mode: {
+      type: "string",
+      enum: ["guide", "command"],
+      default: "guide",
+      description: "bootstrap 用：guide 返回完整初始化说明，command 只返回一条安装命令"
+    },
     accountId: {
       type: "string",
       description: "账号管理用：account_login/check/remove 指定账号ID"
@@ -76,6 +87,11 @@ export const parameters = {
     maxCount: {
       type: "number",
       default: 10
+    },
+    limit: {
+      type: "number",
+      default: 50,
+      description: "logs / sourcing_list 用：最多返回多少条"
     },
     productIndex: {
       type: "number",
@@ -103,12 +119,12 @@ export const parameters = {
     },
     brand: {
       type: "string",
-      description: "jd_harvest用：品牌词(如SWISSE)，内部拼成\"品牌 买手店\"搜索"
+      description: "jd_harvest用：品牌词(如GNC)，内部拼成\"品牌 买手店\"搜索"
     },
     targetCount: {
       type: "number",
       default: 10,
-      description: "jd_harvest用：目标去重商品数(测试时10即可，正式跑设500-1000)"
+      description: "jd_harvest用：目标去重商品数。建议小批量分段执行，先 3-10 个验证流程，再逐步增加。"
     },
     maxPagesPerShop: {
       type: "number",
@@ -182,10 +198,11 @@ async function openSessionChecked(ctx, db, platform) {
   throw err;
 }
 
-// 从策略引擎读默认值，调用方可覆盖。策略引擎是唯一真相来源。
-function loadStrategyDefaults(strategyId) {
-  const s = DEFAULT_STRATEGIES[strategyId || "no-source-arbitrage"] || DEFAULT_STRATEGIES["no-source-arbitrage"];
-  return {
+// 从策略引擎/数据库策略库读默认值，调用方可覆盖。
+function loadStrategyDefaults(db, strategyId) {
+  const s = getStrategyById(db, strategyId) || DEFAULT_STRATEGIES["no-source-arbitrage"];
+  const base = DEFAULT_STRATEGIES["no-source-arbitrage"];
+  const normalized = {
     id: s.id,
     name: s.name,
     jd: {
@@ -207,10 +224,82 @@ function loadStrategyDefaults(strategyId) {
       minAmount: s.profit?.minAmount ?? 20
     },
     riskControl: {
-      retryAfterHours: s.riskControl?.retryAfterHours ?? 5,
-      notifyOnDetection: s.riskControl?.notifyOnDetection ?? true,
-      maxRetries: s.riskControl?.maxRetries ?? 3
+      retryAfterHours: s.riskControl?.retryAfterHours ?? base.riskControl?.retryAfterHours ?? 5,
+      notifyOnDetection: s.riskControl?.notifyOnDetection ?? base.riskControl?.notifyOnDetection ?? true,
+      maxRetries: s.riskControl?.maxRetries ?? base.riskControl?.maxRetries ?? 3,
+      bannedBrands: Array.isArray(s.riskControl?.bannedBrands)
+        ? s.riskControl.bannedBrands
+        : (base.riskControl?.bannedBrands || [])
     }
+  };
+  return {
+    ...normalized,
+    strategy: {
+      id: normalized.id,
+      name: normalized.name,
+      platforms: {
+        jd: normalized.jd,
+        taobao: normalized.taobao
+      },
+      profit: normalized.profit,
+      riskControl: normalized.riskControl
+    }
+  };
+}
+
+function enrichJdCandidateForStorage(candidate) {
+  const unitPriceResult = calculateUnitPrice(candidate.price, candidate.title, candidate.skuInfo || "");
+  return {
+    ...candidate,
+    unitPrice: candidate.unitPrice ?? unitPriceResult.unitPrice,
+    unit: candidate.unit || unitPriceResult.unit || "",
+    spec: candidate.spec || unitPriceResult.spec || null,
+    unitPriceFormula: unitPriceResult.formula || ""
+  };
+}
+
+function saveJdCandidate(db, candidate, strategy) {
+  db.saveSourcing({
+    productId: candidate.productId,
+    title: candidate.title,
+    price: candidate.price,
+    unitPrice: candidate.unitPrice,
+    unit: candidate.unit,
+    shop: candidate.shop,
+    shopType: candidate.shopType || "buyer",
+    comments: String(candidate.commentsNum || candidate.comments || ""),
+    skuInfo: candidate.skuInfo || "",
+    brand: candidate.brand || extractBrand(candidate.title),
+    url: candidate.url,
+    screenshotPath: candidate.screenshotPath || ""
+  }, [], null, { id: strategy.id });
+}
+
+function keywordBannedByStrategy(keyword, strategy) {
+  const banned = findBannedBrandMatch({ title: keyword, brand: keyword }, strategy);
+  if (!banned) return null;
+  return {
+    ok: false,
+    code: "BANNED_BRAND",
+    bannedBrand: banned.name,
+    message: `关键词命中策略禁售品牌「${banned.name}」，已停止执行。请先换品牌或修改策略库。`
+  };
+}
+
+function getStrategyById(db, strategyId) {
+  const id = strategyId || "no-source-arbitrage";
+  if (DEFAULT_STRATEGIES[id]) return DEFAULT_STRATEGIES[id];
+  const profile = db?.getStrategyProfile?.(id);
+  if (!profile?.strategy) return null;
+  return strategyProfileToStrategy(profile);
+}
+
+function strategyProfileToStrategy(profile) {
+  return {
+    id: profile.id,
+    name: profile.name || profile.id,
+    description: profile.description || "",
+    ...(profile.strategy || {})
   };
 }
 
@@ -259,15 +348,17 @@ export async function handler(ctx, db, input) {
         action,
         guide: {
           name: "电商选品MCP",
-          description: "一套通用AI驱动选品引擎。京东找买手店品 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
-          workflow: "jd_harvest → Agent从标题提取品牌+品名 → taobao_harvest(以此为keyword) → Agent同款匹配+核算利润 → 存库 → 导出",
+          description: "一套通用AI驱动选品引擎。京东找买手店候选 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
+          workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → Agent同款匹配+核算利润 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
-              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店→翻页→进详情→评价>2", params: "brand, targetCount(默认10), maxPagesPerShop(默认3)" },
+              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3)" },
               { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
             ],
             data: [
               { name: "save_sourcing", desc: "Agent匹配后存库：京东品+淘宝匹配列表→入库，供导出用", params: "jdProduct, taobaoMatches, strategyId" },
+              { name: "sourcing_list", desc: "查看当前已入库的京东候选和淘宝匹配数量，适合断点续跑或导出前确认", params: "limit" },
+              { name: "logs", desc: "查看最近 MCP 操作日志，排查哪一步失败或是否已经入库", params: "limit" },
               { name: "export_results", desc: "导出CSV到本地，表格含京东+淘宝+利润+链接" },
               { name: "export_feishu", desc: "导出飞书多维表格，截图嵌单元格在线看。需先bind_feishu绑定" },
             ],
@@ -286,15 +377,35 @@ export async function handler(ctx, db, input) {
             ]
           },
           tips: [
-            "京东搜'品牌+买手店'(如SWISSE 买手店)命中率最高",
-            "jd_harvest返回后，Agent从标题提取'品牌+产品名'（别带规格），用作文本taobao_harvest的keyword",
-            "Agent负责清洗:算最小规格单价+同款去重+按策略利润筛选(35%-60%)",
+            "京东第一段搜'品牌+买手店'(如GNC 买手店)找买手店名；第二段只搜买手店名，不拼产品名，避免漏掉该店其它同品牌品。",
+            "禁售品牌在策略库 riskControl.bannedBrands 里配置，命中后不启动采集、不入库。",
+            "jd_harvest会先保存京东候选；返回后，Agent必须从标题提取'品牌+核心品名'（别带规格），再调用taobao_harvest",
+            "taobao_harvest只返回通过基础规则的淘宝候选；如果 selectedSkuRejectReason 不为空，该候选会进入 rejected，Agent不要拿它入库",
+            "Agent完成同款复核、单位价和利润计算后，必须调用save_sourcing把匹配结果写回库",
+            "导出前建议调用sourcing_list确认 taobaoMatchCount 是否大于0；如果全是0，说明还只存了京东候选，没完成淘宝匹配入库",
+            "Agent负责清洗: 算最小规格单价、同款去重、按策略利润筛选(默认35%-60%且最低20元)",
             "筛选逻辑从策略引擎读取(loadStrategyDefaults)，改策略文件即生效",
             "浏览器永不关闭(避免风控)，账号存本机(用户隔离)",
             "CSV表格嵌不了图，飞书表格可以嵌图在线看"
           ]
         },
         message: "使用指南已返回，请按 guide.actions 查看可用操作"
+      };
+    }
+
+    if (action === "bootstrap") {
+      const command = buildWorkerInstallCommand();
+      const mode = input.mode || "guide";
+      return {
+        ok: true,
+        action,
+        mode,
+        installScriptUrl: installScriptUrl(),
+        installCommand: command,
+        guide: mode === "command" ? null : buildBootstrapGuide(),
+        message: mode === "command"
+          ? `请在需要操作 Chrome 的用户电脑运行：${command}`
+          : "已返回本机 worker 初始化说明。服务器 MCP 只排队转发，真正打开 Chrome 的是用户电脑 local-worker。"
       };
     }
 
@@ -309,23 +420,34 @@ export async function handler(ctx, db, input) {
     }
 
     if (action === "strategy_list") {
+      const customProfiles = db.listStrategyProfiles().filter((profile) => !DEFAULT_STRATEGIES[profile.id]);
       return {
         ok: true,
         action,
-        strategies: Object.values(DEFAULT_STRATEGIES),
-        message: `${Object.keys(DEFAULT_STRATEGIES).length} 个策略`
+        strategies: [...Object.values(DEFAULT_STRATEGIES), ...customProfiles.map(strategyProfileToStrategy)],
+        message: `${Object.keys(DEFAULT_STRATEGIES).length + customProfiles.length} 个策略`
       };
     }
 
     if (action === "strategy_get") {
-      const strategy = DEFAULT_STRATEGIES[input.strategyId];
+      const strategy = getStrategyById(db, input.strategyId);
       if (!strategy) return { ok: false, message: `策略不存在: ${input.strategyId}` };
       return { ok: true, action, strategy };
     }
 
     if (action === "strategy_save") {
-      // TODO: 保存到数据库
-      return { ok: true, action, message: "策略保存功能待实现" };
+      const strategy = input.strategy;
+      if (!strategy || typeof strategy !== "object") return { ok: false, action, message: "缺少 strategy 对象" };
+      if (!strategy.id) return { ok: false, action, message: "strategy.id 必填" };
+      if (DEFAULT_STRATEGIES[strategy.id]) return { ok: false, action, message: "内置策略不可覆盖，请换一个 strategy.id" };
+      db.upsertStrategyProfile({
+        id: String(strategy.id),
+        name: String(strategy.name || strategy.id),
+        description: String(strategy.description || ""),
+        strategy,
+        builtin: false
+      });
+      return { ok: true, action, strategy, message: `策略已保存：${strategy.id}` };
     }
 
     // ===== 账号池管理（每个用户管自己的账号，存本机，隔离）=====
@@ -415,9 +537,53 @@ export async function handler(ctx, db, input) {
       const jd = input.jdProduct;
       const matches = input.taobaoMatches || [];
       if (!jd || !jd.productId) return { ok: false, action, message: "缺少 jdProduct.productId" };
-      const st = loadStrategyDefaults(input.strategyId);
-      db.saveSourcing(jd, matches, null, { id: st.id });
-      return { ok: true, action, saved: matches.length, message: `已存库: 1个京东品 + ${matches.length}个淘宝匹配` };
+      const st = loadStrategyDefaults(db, input.strategyId);
+      const jdEvaluation = evaluateJdProductByStrategy(jd, st.strategy);
+      if (!jdEvaluation.passed) {
+        safeAddLog(db, "warn", `save_sourcing 拦截京东品：${jd.productId} ${jdEvaluation.reason}`);
+        return { ok: false, action, code: "STRATEGY_REJECTED", message: jdEvaluation.reason };
+      }
+      const rejectedMatches = [];
+      const allowedMatches = matches.filter((match) => {
+        const taobao = match?.taobao || match;
+        const evaluated = evaluateTaobaoProductByStrategy(taobao, st.strategy);
+        if (evaluated.passed) return true;
+        rejectedMatches.push({ productId: taobao?.productId || "", reason: evaluated.reason });
+        return false;
+      });
+      db.saveSourcing(jd, allowedMatches, null, { id: st.id });
+      safeAddLog(db, "info", `save_sourcing 已入库：${jd.productId}，淘宝匹配 ${allowedMatches.length} 条，策略淘汰 ${rejectedMatches.length} 条`);
+      return {
+        ok: true,
+        action,
+        saved: allowedMatches.length,
+        rejectedMatches,
+        message: `已存库: 1个京东品 + ${allowedMatches.length}个淘宝匹配`
+      };
+    }
+
+    if (action === "sourcing_list") {
+      const limit = clampLimit(input.limit, 50);
+      const items = db.listSourcingResults(limit);
+      return {
+        ok: true,
+        action,
+        count: items.length,
+        items,
+        message: `已返回最近 ${items.length} 条入库选品结果`
+      };
+    }
+
+    if (action === "logs") {
+      const limit = clampLimit(input.limit, 50);
+      const logs = db.listLogs(limit);
+      return {
+        ok: true,
+        action,
+        count: logs.length,
+        logs,
+        message: `已返回最近 ${logs.length} 条日志`
+      };
     }
 
     // ===== 导出选品结果为CSV表格（存本地，可下载）=====
@@ -426,6 +592,7 @@ export async function handler(ctx, db, input) {
       mkdirSync(dirname(outPath), { recursive: true });
       const ret = db.exportSourcing(outPath);
       const count = typeof ret === "number" ? ret : (ret?.count ?? ret?.rows ?? 0);
+      safeAddLog(db, "info", `export_results 已导出 ${count} 条到 ${outPath}`);
       return {
         ok: true,
         action,
@@ -444,6 +611,7 @@ export async function handler(ctx, db, input) {
       if (!result.ok) {
         return { ok: false, action, message: result.message };
       }
+      safeAddLog(db, "info", `export_feishu 已导出 ${result.count} 条到 ${result.url}`);
       return {
         ok: true,
         action,
@@ -519,6 +687,8 @@ export async function handler(ctx, db, input) {
     if (action === "jd_search_filter") {
       if (!input.keyword) return { ok: false, message: "缺少关键词" };
       const strategy = input.strategy || DEFAULT_STRATEGIES[input.strategyId] || DEFAULT_STRATEGIES["no-source-arbitrage"];
+      const bannedKeyword = keywordBannedByStrategy(input.keyword, strategy);
+      if (bannedKeyword) return { ...bannedKeyword, action };
       const session = await openAiSessionWithAccount(ctx, db, "jd");
       await aiJdSearch(session.page, input.keyword);
       const products = await aiExtractJdProducts(session.page, input.maxCount || 30);
@@ -542,11 +712,20 @@ export async function handler(ctx, db, input) {
     // ===== 京东选品（用策略引擎默认值）=====
     if (action === "jd_harvest") {
       const brand = input.brand || input.keyword;
-      if (!brand) return { ok: false, message: "缺少 brand（品牌词，如 SWISSE）" };
-      const st = loadStrategyDefaults(input.strategyId);
+      if (!brand) return { ok: false, message: "缺少 brand（品牌词，如 GNC）" };
+      const st = loadStrategyDefaults(db, input.strategyId);
+      const bannedKeyword = keywordBannedByStrategy(brand, st.strategy);
+      if (bannedKeyword) {
+        safeAddLog(db, "warn", `jd_harvest 拦截禁售品牌：${brand} => ${bannedKeyword.bannedBrand}`);
+        return { ...bannedKeyword, action, brand };
+      }
+      safeAddLog(db, "info", `jd_harvest 开始：brand=${brand} target=${input.targetCount || 10}`);
 
       const session = await openSessionChecked(ctx, db, "jd");
       let result;
+      const savedIds = new Set();
+      const saveErrors = [];
+      let savedCount = 0;
       try {
         result = await aiJdHarvest(session.page, brand, {
           targetCount: input.targetCount || 10,
@@ -555,24 +734,81 @@ export async function handler(ctx, db, input) {
           priceRange: st.jd.priceRange,
           searchSuffix: st.jd.searchSuffix,
           collectShopNames: st.jd.collectShopNames,
-          screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd")
+          screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd"),
+          onCandidate: async (candidate) => {
+            if (!candidate?.productId || savedIds.has(candidate.productId)) return;
+            const enriched = enrichJdCandidateForStorage(candidate);
+            const evaluated = evaluateJdProductByStrategy(enriched, st.strategy);
+            if (!evaluated.passed) {
+              safeAddLog(db, "warn", `jd_harvest 候选未入库：${enriched.productId} ${evaluated.reason}`);
+              return;
+            }
+            try {
+              saveJdCandidate(db, enriched, st);
+              savedIds.add(enriched.productId);
+              savedCount += 1;
+              safeAddLog(db, "info", `jd_harvest 即时入库：${enriched.productId} ${String(enriched.title || "").slice(0, 30)}`);
+            } catch (e) {
+              saveErrors.push({ productId: enriched.productId, message: e instanceof Error ? e.message : String(e) });
+            }
+          }
         });
       } finally { /* 浏览器不关 */ }
 
-      // 自动存库
-      for (const c of result.candidates) {
-        try { db.saveSourcing({ productId: c.productId, title: c.title, price: c.price, shop: c.shop, shopType: c.shopType || 'buyer', comments: String(c.commentsNum||''), skuInfo: c.skuInfo || '', url: c.url, screenshotPath: c.screenshotPath || '' }, [], null, { id: st.id }); } catch (e) {}
+      // 自动存库：京东候选先入库，再把品牌/核心品名清洗交还给调用方 Agent。
+      const strategyRejected = [];
+      const candidates = [];
+      for (const c of result.candidates.map(enrichJdCandidateForStorage)) {
+        const evaluated = evaluateJdProductByStrategy(c, st.strategy);
+        if (!evaluated.passed) {
+          strategyRejected.push({ ...c, reason: evaluated.reason });
+          continue;
+        }
+        candidates.push(c);
+        if (savedIds.has(c.productId)) continue;
+        try {
+          saveJdCandidate(db, c, st);
+          savedIds.add(c.productId);
+          savedCount += 1;
+        } catch (e) {
+          saveErrors.push({ productId: c.productId, message: e instanceof Error ? e.message : String(e) });
+        }
       }
+      const rejected = [...(result.rejected || []), ...strategyRejected];
+      safeAddLog(db, saveErrors.length ? "warn" : "info", `jd_harvest 完成：合格候选 ${candidates.length}，淘汰 ${rejected.length}，入库 ${savedCount}，失败 ${saveErrors.length}`);
+      const suggestedTaobaoTasks = candidates.map((candidate) => {
+        const brandName = candidate.brand || extractBrand(candidate.title);
+        return {
+          jdProductId: candidate.productId,
+          jdTitle: candidate.title,
+          brandCandidate: brandName,
+          searchKeywordCandidates: buildTaobaoSearchKeywords({ brand: brandName, title: candidate.title }),
+          instruction: "请调用方 Agent 先从 jdTitle 提取品牌名和核心品名，去掉规格/装量/营销词，再用品牌+核心品名调用 taobao_harvest。"
+        };
+      });
 
       return {
         ok: true,
         action,
         brand,
         stats: result.stats,
-        candidateCount: result.candidates.length,
-        candidates: result.candidates,
-        agentInstructions: buildJdCleaningInstructions(result.candidates.length, st),
-        message: `京东选品完成：${result.candidates.length}个评价>2的候选品，请按 agentInstructions 清洗`
+        candidateCount: candidates.length,
+        candidates,
+        rejectedCount: rejected.length,
+        rejected,
+        database: {
+          savedCount,
+          saveErrors
+        },
+        agentNextActions: [
+          "读取 candidates 或 suggestedTaobaoTasks。",
+          "对每个京东候选提取品牌名 + 核心品名，去掉规格、瓶数、营销词。",
+          "逐个调用 ecommerce_sourcing({ action:'taobao_harvest', keyword:'品牌 核心品名' })。",
+          "拿京东候选和淘宝候选做同款复核、单位价比价、利润筛选，再调用 save_sourcing 入库。"
+        ],
+        suggestedTaobaoTasks,
+        agentInstructions: buildJdCleaningInstructions(candidates.length, st),
+        message: `京东选品完成：${candidates.length}个评价>=${st.jd.minComments}的候选品，已入库 ${savedCount} 个。下一步请 Agent 提取品牌+核心品名后逐个淘宝比价。`
       };
     }
 
@@ -580,7 +816,13 @@ export async function handler(ctx, db, input) {
     // ===== 淘宝选品（用策略引擎默认值）=====
     if (action === "taobao_harvest") {
       if (!input.keyword) return { ok: false, message: "缺少 keyword(用京东品的品牌+品名)" };
-      const st = loadStrategyDefaults(input.strategyId);
+      const st = loadStrategyDefaults(db, input.strategyId);
+      const bannedKeyword = keywordBannedByStrategy(input.keyword, st.strategy);
+      if (bannedKeyword) {
+        safeAddLog(db, "warn", `taobao_harvest 拦截禁售品牌：${input.keyword} => ${bannedKeyword.bannedBrand}`);
+        return { ...bannedKeyword, action, keyword: input.keyword };
+      }
+      safeAddLog(db, "info", `taobao_harvest 开始：keyword=${input.keyword}`);
       const session = await openSessionChecked(ctx, db, "taobao");
       let result;
       try {
@@ -594,13 +836,39 @@ export async function handler(ctx, db, input) {
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         });
       } finally { /* 浏览器不关 */ }
+      const taobaoStrategyRejected = [];
+      const candidates = result.candidates.map((candidate) => {
+        const unitPriceResult = calculateUnitPrice(candidate.price, candidate.title, candidate.skuInfo || "");
+        return {
+          ...candidate,
+          unitPrice: candidate.unitPrice ?? unitPriceResult.unitPrice,
+          unit: candidate.unit || unitPriceResult.unit || "",
+          spec: candidate.spec || unitPriceResult.spec || null,
+          unitPriceFormula: unitPriceResult.formula || ""
+        };
+      }).filter((candidate) => {
+        const evaluated = evaluateTaobaoProductByStrategy(candidate, st.strategy);
+        if (evaluated.passed) return true;
+        taobaoStrategyRejected.push({ ...candidate, reason: evaluated.reason });
+        return false;
+      });
+      const rejected = [...(result.rejected || []), ...taobaoStrategyRejected];
+      safeAddLog(db, "info", `taobao_harvest 完成：keyword=${input.keyword}，候选 ${candidates.length}，淘汰 ${rejected.length}`);
       return {
         ok: true,
         action,
         keyword: input.keyword,
         stats: result.stats,
-        candidateCount: result.candidates.length,
-        candidates: result.candidates,
+        candidateCount: candidates.length,
+        candidates,
+        rejectedCount: rejected.length,
+        rejected,
+        agentNextActions: [
+          "把本次 taobao_harvest 的 candidates 与对应京东候选做同款复核。",
+          "优先使用 title + skuInfo + screenshotPath 交叉判断，不要只按标题相似。",
+          "按最小规格单位价计算利润，达标后调用 save_sourcing 写入京东品和淘宝匹配。",
+          "如没有同款，回到京东候选列表换下一个品。"
+        ],
         agentInstructions: buildTaobaoCleaningInstructions(result.candidates.length, st),
         message: `淘宝选品完成：${result.candidates.length}个符合(国内+48h+已售达标)的货源，请按 agentInstructions 比价`
       };
@@ -643,72 +911,10 @@ export async function handler(ctx, db, input) {
         message: `提取 ${products.length} 个淘宝商品`
       };
     }
-
-    // ===== 完整自动化选品 =====
-    if (action === "full_selection") {
-      if (!input.keyword) return { ok: false, message: "缺少关键词" };
-      const result = await fullSelectionFlow(ctx, db, input.keyword, {
-        strategyId: input.strategyId,
-        maxJdCandidates: input.maxJdCandidates,
-        maxTaobaoCandidatesPerJd: input.maxTaobaoCandidatesPerJd
-      });
-      return {
-        ok: true,
-        action,
-        keyword: input.keyword,
-        matchedCount: result.matched.length,
-        matched: result.matched.map(m => ({
-          jd: {
-            productId: m.jd.productId,
-            title: m.jd.title,
-            price: m.jd.price,
-            unitPrice: m.jd.unitPrice,
-            unit: m.jd.unit,
-            shop: m.jd.shop,
-            shopType: m.jd.shopType,
-            url: m.jd.url
-          },
-          taobao: {
-            productId: m.taobao.productId,
-            title: m.taobao.title,
-            price: m.taobao.price,
-            unitPrice: m.taobao.unitPrice,
-            unit: m.taobao.unit,
-            shipFrom: m.taobao.shipFrom,
-            url: m.taobao.url
-          },
-          profit: {
-            rate: m.profit.profitRate,
-            amount: m.profit.profitAmount
-          }
-        })),
-        message: `完成！找到 ${result.matched.length} 个可用品`
-      };
-    }
-
-    if (action === "batch_selection") {
-      if (!input.keywords || input.keywords.length === 0) {
-        return { ok: false, message: "缺少关键词列表" };
-      }
-      const results = await batchSelection(ctx, db, input.keywords, {
-        strategyId: input.strategyId,
-        maxJdCandidates: input.maxJdCandidates,
-        maxTaobaoCandidatesPerJd: input.maxTaobaoCandidatesPerJd,
-        targetCount: input.targetCount
-      });
-      const totalMatched = results.reduce((sum, r) => sum + r.matched.length, 0);
-      return {
-        ok: true,
-        action,
-        keywordsProcessed: results.length,
-        totalMatched,
-        message: `批量选品完成！共 ${totalMatched} 个可用品`
-      };
-    }
-
     return { ok: false, message: `未知操作: ${action}` };
 
   } catch (error) {
+    safeAddLog(db, "error", `${action || "unknown"} 失败：${error.message || String(error)}`);
     if (error.code === "NOT_LOGGED_IN") {
       return {
         ok: false,
@@ -727,6 +933,20 @@ export async function handler(ctx, db, input) {
   }
 }
 
+function safeAddLog(db, level, message) {
+  try {
+    db.addLog(null, level, message);
+  } catch {
+    // 日志失败不能影响主流程。
+  }
+}
+
+function clampLimit(value, fallback) {
+  const n = Number(value || fallback);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(1, Math.min(500, Math.floor(n)));
+}
+
 /**
  * 生成给调用方Agent的清洗指令。
  * 设计原则：脚本只负责拉脏数据，去重和算最小规格单价这种需要"理解力"的活，
@@ -736,7 +956,7 @@ function buildJdCleaningInstructions(candidateCount, strategy) {
   const p = strategy?.profit || {};
   const rateRange = `${((p.minRate ?? 0.35) * 100).toFixed(0)}%-${((p.maxRate ?? 0.60) * 100).toFixed(0)}%`;
   return {
-    summary: `已拉取 ${candidateCount} 个京东买手店候选品(评价均>2)。请你对 candidates 数组做以下清洗，得到干净的京东品清单。`,
+    summary: `已拉取 ${candidateCount} 个京东买手店候选品(评价均已达到策略门槛)。请你对 candidates 数组做以下清洗，得到干净的京东品清单。`,
     steps: [
       {
         step: 1,
@@ -771,13 +991,12 @@ function buildTaobaoCleaningInstructions(candidateCount, strategy) {
   const p = strategy?.profit || {};
   const rateRange = `${((p.minRate ?? 0.35) * 100).toFixed(0)}%-${((p.maxRate ?? 0.60) * 100).toFixed(0)}%`;
   return {
-    summary: `已拉取 ${candidateCount} 个淘宝货源(均已通过 国内+48h+已售达标)。利润区间 ${rateRange}，最低 ¥${p.minAmount ?? 20}。请你完成与京东品的比价。`,
-    summary: `已拉取 ${candidateCount} 个淘宝货源(均已通过 国内发货+48h内发+已售达标 三道筛)。请你完成与京东品的比价。`,
+    summary: `已拉取 ${candidateCount} 个淘宝货源(均已通过 国内发货+48h内发+已售达标 三道筛)。利润区间 ${rateRange}，最低 ¥${p.minAmount ?? 20}。请你完成与京东品的比价。`,
     steps: [
       {
         step: 1,
         name: "按SKU算最小规格单价（关键）",
-        detail: "淘宝同一链接里不同SKU(如60粒/200粒、1瓶/5瓶)价格差距很大，不能只用一个价。请从每个货源的 title 和 skuInfo 找出各SKU的规格与价格，分别换算成最小规格单价(每粒/每g/每ml)。规格换算：粒/片按个；g/kg→克(kg×1000)；ml/L→毫升(L×1000)。",
+        detail: "淘宝同一链接里不同SKU(如60粒/200粒、1瓶/5瓶)价格差距很大，不能只用一个价。优先使用 selectedSkuOptions 和 skuInfo 中的当前选中SKU；如果 selectedSkuRejectReason 不为空，说明当前选中SKU明显不是搜索目标，不要入库。请从每个货源的 title 和 skuInfo 找出规格与价格，换算成最小规格单价(每粒/每g/每ml)。规格换算：粒/片按个；g/kg→克(kg×1000)；ml/L→毫升(L×1000)。",
         output: "每个货源标注：各SKU的『规格→价格→最小规格单价』，并取其中最低的最小规格单价作为该货源的比价基准"
       },
       {
@@ -796,4 +1015,3 @@ function buildTaobaoCleaningInstructions(candidateCount, strategy) {
     note: "最小规格单价是京东↔淘宝唯一可比的标尺。务必按SKU拆价，否则同链接不同装量会让比价完全失真。"
   };
 }
-

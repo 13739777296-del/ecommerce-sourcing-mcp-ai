@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +20,7 @@ import { detectRiskControl } from "../lib/risk-guard.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
 import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
+import { pickAccount } from "../lib/accounts.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -155,6 +156,119 @@ describe("ecommerce sourcing core", () => {
 
     expect(buildTaobaoSearchKeyword({ brand: "GNC", title })).toBe("GNC 硫辛酸");
     expect(buildTaobaoSearchKeywords({ brand: "GNC", title })[0]).toBe("GNC 硫辛酸");
+  });
+
+  it("builds a short clean keyword for liquid calcium titles", () => {
+    const title = "OSTEOCARE英国原装进口正品steocare钙镁锌营养液200ml:液体钙3瓶 正品 200ml*3瓶";
+    const keyword = buildTaobaoSearchKeyword({ brand: "Osteocare", title });
+
+    expect(keyword).toBe("Osteocare 液体钙");
+    expect(keyword).not.toMatch(/[:：*]/);
+    expect(keyword).not.toContain("正品");
+    expect(keyword).not.toContain("营养液");
+    expect(keyword.length).toBeLessThan(20);
+  });
+
+  it("filters out Taobao candidates whose title lacks the brand", () => {
+    const filtered = filterTaobaoProductsForHarvest([
+      {
+        productId: "tb-bed",
+        title: "部队14制式营具上下铺课桌椅铁架床制式内务柜高低床单人双层铁床",
+        isDomestic: true,
+        shipFrom: "广东",
+        ship48hKnown: false,
+        salesNum: 200,
+        price: "161",
+        url: "https://item.taobao.com/item.htm?id=tb-bed"
+      },
+      {
+        productId: "tb-calcium",
+        title: "英国Osteocare液体钙镁锌成人中老年孕妇补钙营养液200ml",
+        isDomestic: true,
+        shipFrom: "浙江",
+        ship48hKnown: false,
+        salesNum: 500,
+        price: "150",
+        url: "https://item.taobao.com/item.htm?id=tb-calcium"
+      }
+    ], {
+      requireDomestic: true,
+      require48h: true,
+      minSales: 10,
+      priceMin: 1,
+      priceMax: 999999,
+      brand: "Osteocare",
+      requireBrandInTitle: true
+    });
+
+    expect(filtered.matches.map((m) => m.productId)).toEqual(["tb-calcium"]);
+    expect(filtered.skipped.brandMissing).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps all candidates when brand filtering is disabled in strategy", () => {
+    const filtered = filterTaobaoProductsForHarvest([
+      { productId: "a", title: "随便什么标题", isDomestic: true, ship48hKnown: false, salesNum: 100, price: "100", url: "x" }
+    ], {
+      requireDomestic: true, require48h: true, minSales: 10, priceMin: 1, priceMax: 999999,
+      brand: "Osteocare", requireBrandInTitle: false
+    });
+    expect(filtered.matches).toHaveLength(1);
+  });
+
+  it("stops a shop only after consecutive below-threshold products when sorted by comments", () => {
+    // 单个不达标：容忍解析抖动，不停店
+    const firstReject = shouldStopJdShopHarvest(
+      { detailCheckedInShop: 1, consecutiveCommentRejects: 1 },
+      { maxDetailPerShop: 12, maxConsecutiveCommentRejectsPerShop: 8, sortedByComments: true }
+    );
+    expect(firstReject.stop).toBe(false);
+
+    // 连续 2 个不达标：降序下确定到尾部，停店
+    const secondReject = shouldStopJdShopHarvest(
+      { detailCheckedInShop: 2, consecutiveCommentRejects: 2 },
+      { maxDetailPerShop: 12, maxConsecutiveCommentRejectsPerShop: 8, sortedByComments: true }
+    );
+    expect(secondReject.stop).toBe(true);
+    expect(secondReject.code).toBe("sorted_below_threshold");
+
+    // 非排序模式：连续 2 个仍不停（沿用旧的连续 8 个阈值）
+    const unsorted = shouldStopJdShopHarvest(
+      { detailCheckedInShop: 2, consecutiveCommentRejects: 2 },
+      { maxDetailPerShop: 12, maxConsecutiveCommentRejectsPerShop: 8 }
+    );
+    expect(unsorted.stop).toBe(false);
+  });
+
+  it("rotates across available accounts to spread load", () => {
+    let tick = 0;
+    const accounts = [
+      { id: "jd-A", platform: "jd", displayName: "京东A", status: "available", updatedAt: "2020-01-01T01:00:00.000Z" },
+      { id: "jd-B", platform: "jd", displayName: "京东B", status: "available", updatedAt: "2020-01-01T02:00:00.000Z" }
+    ];
+    const db = {
+      listAccounts: (platform?: string) => accounts.filter((a) => !platform || a.platform === platform),
+      touchAccount: (id: string) => {
+        const a = accounts.find((x) => x.id === id);
+        if (a) a.updatedAt = `2020-01-01T03:00:${String(tick++).padStart(2, "0")}.000Z`;
+      },
+      upsertAccount: () => {}
+    };
+
+    const picks = [0, 1, 2, 3].map(() => pickAccount({} as never, db as never, "jd").id);
+    expect(picks).toEqual(["jd-A", "jd-B", "jd-A", "jd-B"]);
+  });
+
+  it("skips paused accounts during rotation", () => {
+    const accounts = [
+      { id: "jd-A", platform: "jd", displayName: "京东A", status: "paused", updatedAt: "2020-01-01T01:00:00.000Z" },
+      { id: "jd-B", platform: "jd", displayName: "京东B", status: "available", updatedAt: "2020-01-01T02:00:00.000Z" }
+    ];
+    const db = {
+      listAccounts: (platform?: string) => accounts.filter((a) => !platform || a.platform === platform),
+      touchAccount: () => {},
+      upsertAccount: () => {}
+    };
+    expect(pickAccount({} as never, db as never, "jd").id).toBe("jd-B");
   });
 
   it("rejects irrelevant Taobao candidates before profit comparison", () => {
@@ -996,6 +1110,46 @@ describe("ecommerce sourcing core", () => {
     expect(saved.saved).toBe(0);
     expect(saved.reviewCleared).toBe(true);
     expect(state.pendingReviewJdProductIds).toEqual(["jd-still-pending"]);
+  });
+
+  it("archives completed AI review task files after save_sourcing", async () => {
+    const dataDir = tempDir();
+    const ctx = testContext(dataDir);
+    const reviewDir = join(dataDir, "review-tasks");
+    mkdirSync(reviewDir, { recursive: true });
+    const taskPath = join(reviewDir, "123456_jd-reviewed-archive.json");
+    writeFileSync(taskPath, JSON.stringify({
+      task: {
+        jdProduct: {
+          productId: "jd-reviewed-archive",
+          title: "MegaGold 辅酶Q10 软胶囊 60粒"
+        },
+        taobaoCandidates: []
+      }
+    }), "utf8");
+    writeFileSync(join(reviewDir, "unrelated.json"), JSON.stringify({
+      task: { jdProduct: { productId: "jd-other" }, taobaoCandidates: [] }
+    }), "utf8");
+
+    const saved = await sourcingExecute({
+      action: "save_sourcing",
+      jdProduct: {
+        productId: "jd-reviewed-archive",
+        title: "MegaGold 辅酶Q10 软胶囊 60粒",
+        price: 96,
+        comments: "3",
+        shop: "京东买手店",
+        shopType: "buyer",
+        skuInfo: "60粒*1瓶"
+      },
+      taobaoMatches: []
+    }, ctx);
+
+    expect(saved.ok).toBe(true);
+    expect(saved.archivedReviewTasks).toBe(1);
+    expect(existsSync(taskPath)).toBe(false);
+    expect(existsSync(join(reviewDir, "reviewed", "123456_jd-reviewed-archive.json"))).toBe(true);
+    expect(existsSync(join(reviewDir, "unrelated.json"))).toBe(true);
   });
 
   it("allows low-cost Taobao supply after Agent review because cheap supply is the point", async () => {

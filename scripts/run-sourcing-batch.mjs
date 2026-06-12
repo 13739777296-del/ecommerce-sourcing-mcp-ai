@@ -31,6 +31,10 @@ const taobaoAccountId = stringArg(args.taobaoAccountId);
 const strategy = DEFAULT_STRATEGIES["no-source-arbitrage"];
 const ctx = { dataDir, config: { get: () => "" }, log: console };
 const sleepMs = numberArg(args.sleepMs, 1500);
+// 节流：每跑 restEvery 个品牌，强制长休息 restMs 毫秒，打断"持续高频"这一最易触发风控的模式。
+// 默认偏产能（10个品牌歇60秒），可按账号风控情况调大 restMs / 调小 restEvery。
+const restEvery = numberArg(args.restEvery, 10);
+const restMs = numberArg(args.restMs, 60000);
 
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(reviewOutputDir, { recursive: true });
@@ -211,7 +215,13 @@ for (const brand of brandQueue) {
   state.completedBrands.push(brand);
   state.currentBrand = "";
   saveState(statePath, state);
-  await sleep(sleepMs);
+  // 周期性长休息：每 restEvery 个品牌歇一次，降低持续操作触发风控的概率。
+  if (restEvery > 0 && scannedBrands % restEvery === 0) {
+    console.log(`[batch] 已连续处理 ${scannedBrands} 个品牌，强制休息 ${Math.round(restMs / 1000)} 秒降低风控风险...`);
+    await sleep(restMs);
+  } else {
+    await sleep(sleepMs);
+  }
 }
 
 const finalCount = qualifiedCount();

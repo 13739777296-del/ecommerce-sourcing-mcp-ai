@@ -16,7 +16,7 @@ import { buildAiReviewTask, dbRowToJdProduct } from "../lib/ai-review-task.js";
 
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { exportToFeishu, bindFeishu, sendFeishuMsg, startFeishuChannel, readFeishuMsgs } from "../lib/feishu.js";
 import { buildBootstrapGuide, buildWorkerInstallCommand, installScriptUrl } from "../lib/bootstrap-guide.js";
 
@@ -230,11 +230,15 @@ async function openSessionChecked(ctx, db, platform, accountId = null) {
     err.code = "NOT_LOGGED_IN";
     throw err;
   }
-  // 优先用数据库里已知可用的账号（避免每次都开Chrome probe）
-  const knownGood = accounts.find((a) => a.status === "available" && a.platform === platform);
-  if (knownGood) {
-    // 信任数据库状态（最近account_check验证过的），不开Chrome重查
-    console.log(`[预检] 账号「${knownGood.displayName}」状态可用，直接使用`);
+  // 账号轮换：在所有"已知可用"的账号里，选最久没用过的（updated_at 最早），
+  // 分摊单账号压力、降低风控；新加入账号池的账号会自动被纳入轮换，paused 的自动排除。
+  const available = accounts.filter((a) => a.status === "available" && a.platform === platform);
+  if (available.length) {
+    const knownGood = [...available].sort((a, b) =>
+      String(a.updatedAt || "").localeCompare(String(b.updatedAt || "")) || String(a.id).localeCompare(String(b.id))
+    )[0];
+    db.touchAccount(knownGood.id); // 标记本次使用，下次轮到别的账号
+    console.log(`[预检] 轮换选用账号「${knownGood.displayName}」（共 ${available.length} 个可用，按最久未用挑选）`);
     return await openAiSessionWithAccount(ctx, db, platform, "about:blank", knownGood.id);
   }
   // 没有已知可用的，逐个probe
@@ -243,6 +247,7 @@ async function openSessionChecked(ctx, db, platform, accountId = null) {
     const probe = await probeAccountLoginStatus(acct);
     setAccountStatus(db, acct.id, probe.status, probe.event);
     if (probe.status === "available") {
+      db.touchAccount(acct.id);
       console.log(`[预检] 账号「${acct.displayName}」已登录，开始工作`);
       return await openAiSessionWithAccount(ctx, db, platform, "about:blank", acct.id);
     }
@@ -275,7 +280,8 @@ function loadStrategyDefaults(db, strategyId) {
       shipFrom: s.platforms?.taobao?.shipFrom || "domestic",
       shipWithinHours: s.platforms?.taobao?.shipWithinHours ?? 48,
       minSales: s.platforms?.taobao?.minSales ?? 10,
-      priceRange: s.platforms?.taobao?.priceRange || [80, 999999]
+      priceRange: s.platforms?.taobao?.priceRange || [80, 999999],
+      requireBrandInTitle: s.platforms?.taobao?.requireBrandInTitle ?? true
     },
     profit: {
       minRate: s.profit?.minRate ?? 0.35,
@@ -429,11 +435,11 @@ export async function handler(ctx, db, input) {
         guide: {
           name: "电商选品MCP",
           description: "一套通用AI驱动选品引擎。京东找买手店候选 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
-          workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
+          workflow: "jd_harvest(京东候选先入库，列表已按评论数倒序，评价达标才进) → Agent审核清洗候选(确认是买手店/评价≥门槛/价格在区间) → Agent从京东标题提取品牌+核心品名(去掉规格/装量/营销词) → taobao_harvest(keyword=品牌+核心品名，并把 brand 单独传入做标题品牌过滤) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
               { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, accountId(可选指定账号), targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },
-              { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, accountId(可选指定账号), minSales(默认10), requireDomestic, require48h" },
+              { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛品牌+国内+48h+已售→进详情→SKU+截图", params: "keyword, brand(强烈建议传：从京东标题提取的品牌名，淘宝标题不含该品牌会被跳过), accountId(可选指定账号), minSales(默认10), requireDomestic, require48h, requireBrandInTitle(默认随策略，true时标题必须含品牌)" },
             ],
             data: [
               { name: "ai_review_task", desc: "生成AI审核任务包：只给证据、策略和输出格式，不由脚本裁决同款、SKU单位价或利润", params: "jdProduct或jdProductId, taobaoCandidates, keyword, strategyId" },
@@ -462,7 +468,9 @@ export async function handler(ctx, db, input) {
             "京东第一段搜'品牌+买手店'(如GNC 买手店)找买手店名；第二段只搜买手店名，不拼产品名。批量脚本会传入allowedBrands，买手店页里命中任一可用品牌的商品都可进入详情。",
             "多个账号可用时，调用方可在 jd_harvest / taobao_harvest / 单步搜索里传 accountId，明确指定本次使用哪个账号；账号平台不匹配会直接拒绝，不会打开浏览器。",
             "禁售品牌在策略库 riskControl.bannedBrands 里配置，命中后不启动采集、不入库。",
-            "jd_harvest会先保存京东候选；返回后，Agent必须从标题提取'品牌+核心品名'（别带规格），再调用taobao_harvest。",
+            "jd_harvest会先保存京东候选；返回后，Agent必须做两件事：(1)审核清洗候选——确认是买手店、评价≥策略门槛、价格在区间内，淘汰不合规的；(2)从京东标题提取'品牌+核心品名'（去掉规格/装量/营销词）。",
+            "调用taobao_harvest时，keyword传'品牌+核心品名'，并务必把 brand 单独传入（如\"Osteocare\"）：淘宝标题不含该品牌词的商品会被直接跳过，杜绝铁架床这类无关品。是否强制品牌由策略库 platforms.taobao.requireBrandInTitle 控制（默认true），用户可在自己的策略里关闭。",
+            "京东列表会自动点'按评论总数倒序'，评论高的排前面；逐个进详情时连续2个评论不达标即跳过该店（降序后后面只会更低）。多账号会自动轮换分摊压力。",
             "taobao_harvest只返回通过基础规则的淘宝候选；如果 selectedSkuRejectReason 不为空，该候选会进入 rejected，Agent不要拿它入库",
             "taobao_harvest之后建议先调用ai_review_task生成审核包。最终同款复核、SKU单位价和利润计算必须由Agent/AI根据标题、SKU、截图和页面字段完成，脚本字段只能当提示。",
             "Agent完成同款复核、单位价和利润计算后，必须调用save_sourcing把匹配结果写回库",
@@ -699,6 +707,7 @@ export async function handler(ctx, db, input) {
       });
       db.saveSourcing(jd, allowedMatches, null, { id: st.id });
       const reviewCleared = markBatchReviewCompleted(ctx, jd.productId);
+      const archivedReviewTasks = archiveCompletedReviewTasks(ctx, jd.productId);
       safeAddLog(db, "info", `save_sourcing 已入库：${jd.productId}，淘宝匹配 ${allowedMatches.length} 条，策略淘汰 ${rejectedMatches.length} 条`);
       return {
         ok: true,
@@ -706,6 +715,7 @@ export async function handler(ctx, db, input) {
         saved: allowedMatches.length,
         rejectedMatches,
         reviewCleared,
+        archivedReviewTasks,
         message: `已存库: 1个京东品 + ${allowedMatches.length}个淘宝匹配`
       };
     }
@@ -799,13 +809,14 @@ export async function handler(ctx, db, input) {
     if (action === "jd_search") {
       if (!input.keyword) return { ok: false, message: "缺少关键词" };
       const session = await openAiSessionWithAccount(ctx, db, "jd", "about:blank", input.accountId || null);
-      const result = await aiJdSearch(session.page, input.keyword, { platform: "jd", account: session.account });
+      const result = await aiJdSearch(session.page, input.keyword, { platform: "jd", account: session.account, sortByComments: input.sortByComments });
       return {
         ok: true,
         action,
         keyword: input.keyword,
         url: result.url,
         title: result.title,
+        sorted: result.sorted,
         message: "京东搜索完成"
       };
     }
@@ -943,7 +954,7 @@ export async function handler(ctx, db, input) {
           jdTitle: candidate.title,
           brandCandidate: brandName,
           searchKeywordCandidates: buildTaobaoSearchKeywords({ brand: brandName, title: candidate.title }),
-          instruction: "请调用方 Agent 先从 jdTitle 提取品牌名和核心品名，去掉规格/装量/营销词，再用品牌+核心品名调用 taobao_harvest。"
+          instruction: "请调用方 Agent 先审核该候选是否合规，再从 jdTitle 提取品牌名和核心品名（去掉规格/装量/营销词），用 keyword='品牌 核心品名' 且 brand='品牌名' 调用 taobao_harvest。brandCandidate 仅供参考，请以你的判断为准。"
         };
       });
 
@@ -962,8 +973,9 @@ export async function handler(ctx, db, input) {
         },
         agentNextActions: [
           "读取 candidates 或 suggestedTaobaoTasks。",
-          "对每个京东候选提取品牌名 + 核心品名，去掉规格、瓶数、营销词。",
-          "逐个调用 ecommerce_sourcing({ action:'taobao_harvest', keyword:'品牌 核心品名' })。",
+          "先审核清洗每个京东候选：确认是买手店、评价≥门槛、价格在策略区间，淘汰不合规的。",
+          "对每个保留的候选提取品牌名 + 核心品名，去掉规格、瓶数、营销词。",
+          "逐个调用 ecommerce_sourcing({ action:'taobao_harvest', keyword:'品牌 核心品名', brand:'品牌名' })——务必传 brand，淘宝标题不含品牌的会被自动跳过。",
           "调用 ecommerce_sourcing({ action:'ai_review_task', jdProduct, taobaoCandidates }) 生成审核包。",
           "由Agent/多模态模型亲自做同款复核、SKU单位价换算、利润筛选，再调用 save_sourcing 入库。"
         ],
@@ -994,6 +1006,8 @@ export async function handler(ctx, db, input) {
           requireDomestic: input.requireDomestic ?? (st.taobao.shipFrom === "domestic"),
           require48h: input.require48h ?? (st.taobao.shipWithinHours === 48),
           priceRange: st.taobao.priceRange,
+          brand: input.brand || "",
+          requireBrandInTitle: input.requireBrandInTitle ?? st.taobao.requireBrandInTitle ?? true,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         });
       } finally { /* 浏览器不关 */ }
@@ -1144,6 +1158,48 @@ function markBatchReviewCompleted(ctx, productId) {
   } catch {
     return false;
   }
+}
+
+function archiveCompletedReviewTasks(ctx, productId) {
+  if (!productId) return 0;
+  const reviewDir = pathJoin(ctx?.dataDir || ".", "review-tasks");
+  if (!existsSync(reviewDir)) return 0;
+  const archiveDir = pathJoin(reviewDir, "reviewed");
+  mkdirSync(archiveDir, { recursive: true });
+  let archived = 0;
+  for (const fileName of readdirSync(reviewDir)) {
+    if (!fileName.endsWith(".json")) continue;
+    const source = pathJoin(reviewDir, fileName);
+    let taskProductId = "";
+    try {
+      const parsed = JSON.parse(readFileSync(source, "utf8"));
+      taskProductId = String(
+        parsed?.task?.jdProduct?.productId
+        || parsed?.jdProduct?.productId
+        || parsed?.jdProductId
+        || ""
+      );
+    } catch {
+      continue;
+    }
+    if (taskProductId !== productId) continue;
+    renameSync(source, uniqueArchivePath(archiveDir, fileName));
+    archived += 1;
+  }
+  return archived;
+}
+
+function uniqueArchivePath(dir, fileName) {
+  const initial = pathJoin(dir, fileName);
+  if (!existsSync(initial)) return initial;
+  const dot = fileName.lastIndexOf(".");
+  const base = dot >= 0 ? fileName.slice(0, dot) : fileName;
+  const ext = dot >= 0 ? fileName.slice(dot) : "";
+  for (let i = 1; i < 1000; i += 1) {
+    const candidate = pathJoin(dir, `${base}.${i}${ext}`);
+    if (!existsSync(candidate)) return candidate;
+  }
+  return pathJoin(dir, `${base}.${Date.now()}${ext}`);
 }
 
 function clampLimit(value, fallback) {

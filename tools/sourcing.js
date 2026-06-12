@@ -16,7 +16,7 @@ import { buildAiReviewTask, dbRowToJdProduct } from "../lib/ai-review-task.js";
 
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { exportToFeishu, bindFeishu, sendFeishuMsg, startFeishuChannel, readFeishuMsgs } from "../lib/feishu.js";
 import { buildBootstrapGuide, buildWorkerInstallCommand, installScriptUrl } from "../lib/bootstrap-guide.js";
 
@@ -698,12 +698,14 @@ export async function handler(ctx, db, input) {
         return false;
       });
       db.saveSourcing(jd, allowedMatches, null, { id: st.id });
+      const reviewCleared = markBatchReviewCompleted(ctx, jd.productId);
       safeAddLog(db, "info", `save_sourcing 已入库：${jd.productId}，淘宝匹配 ${allowedMatches.length} 条，策略淘汰 ${rejectedMatches.length} 条`);
       return {
         ok: true,
         action,
         saved: allowedMatches.length,
         rejectedMatches,
+        reviewCleared,
         message: `已存库: 1个京东品 + ${allowedMatches.length}个淘宝匹配`
       };
     }
@@ -1122,6 +1124,25 @@ function safeAddLog(db, level, message) {
     db.addLog(null, level, message);
   } catch {
     // 日志失败不能影响主流程。
+  }
+}
+
+function markBatchReviewCompleted(ctx, productId) {
+  if (!productId) return false;
+  const file = pathJoin(ctx?.dataDir || ".", "batch-sourcing-state.json");
+  if (!existsSync(file)) return false;
+  try {
+    const state = JSON.parse(readFileSync(file, "utf8"));
+    const pending = Array.isArray(state.pendingReviewJdProductIds) ? state.pendingReviewJdProductIds : [];
+    const nextPending = pending.filter((id) => id !== productId);
+    const changed = nextPending.length !== pending.length;
+    if (!changed) return false;
+    state.pendingReviewJdProductIds = nextPending;
+    state.reviewedJdProductIds = [...new Set([...(state.reviewedJdProductIds || []), productId])];
+    writeFileSync(file, JSON.stringify(state, null, 2), "utf8");
+    return true;
+  } catch {
+    return false;
   }
 }
 

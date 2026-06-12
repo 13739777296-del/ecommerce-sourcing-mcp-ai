@@ -963,6 +963,41 @@ describe("ecommerce sourcing core", () => {
     });
   });
 
+  it("clears pending batch review state when save_sourcing finishes with no Taobao match", async () => {
+    const dataDir = tempDir();
+    const ctx = testContext(dataDir);
+    const statePath = join(dataDir, "batch-sourcing-state.json");
+    writeFileSync(statePath, JSON.stringify({
+      version: 2,
+      pendingReviewJdProductIds: ["jd-reviewed-empty", "jd-still-pending"],
+      completedBrands: [],
+      completedJdProductIds: ["jd-reviewed-empty"],
+      completedProductFingerprints: [],
+      currentBrand: "",
+      runs: []
+    }), "utf8");
+
+    const saved = await sourcingExecute({
+      action: "save_sourcing",
+      jdProduct: {
+        productId: "jd-reviewed-empty",
+        title: "KaKife 白番茄烟酰胺 60粒",
+        price: 89,
+        comments: "3",
+        shop: "京东买手店",
+        shopType: "buyer",
+        skuInfo: "60粒*1瓶"
+      },
+      taobaoMatches: []
+    }, ctx);
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+
+    expect(saved.ok).toBe(true);
+    expect(saved.saved).toBe(0);
+    expect(saved.reviewCleared).toBe(true);
+    expect(state.pendingReviewJdProductIds).toEqual(["jd-still-pending"]);
+  });
+
   it("allows low-cost Taobao supply after Agent review because cheap supply is the point", async () => {
     const dataDir = tempDir();
     const ctx = testContext(dataDir);

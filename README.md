@@ -1,6 +1,6 @@
 # 电商选品 MCP - AI 驱动
 
-> 一个 MCP 工具，给通用 Agent 增加电商选品能力：京东找候选品、淘宝找供货、单位价比价、结果入库和导出。
+> 一个 MCP 工具，给通用 Agent 增加电商选品能力：京东找候选品、淘宝找供货、生成 AI 审核任务包、结果入库和导出。
 
 ## 核心能力
 
@@ -18,10 +18,11 @@ ecommerce_sourcing({
 1. `jd_harvest`：先用“品牌 + 买手店”收集买手店名，再只搜买手店名。批量脚本会传入品牌表作为 `allowedBrands`，买手店页里命中任一可用品牌的商品都可进入详情页复核评论数、SKU、主图和价格，并先入库。
 2. 调用方 Agent：从京东候选标题里提取品牌名 + 核心品名，去掉规格、瓶数、营销词。
 3. `taobao_harvest`：用 Agent 清洗后的关键词逐品去淘宝找供货，筛国内发货、48 小时内发货、销量门槛。前几次搜索必须保留品牌词，不能直接用“美国原装进口 + 品类”这类泛词。
-4. 调用方 Agent：做同款复核、SKU 单位价比价、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。
-5. `save_sourcing`：把京东品和匹配的淘宝货源写回本地库。
-6. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
-7. `export_results` / `export_feishu`：导出 CSV 或飞书表格。导出前会按“同款商品”最终去重，返回的 `count` 才是最终可用商品数。
+4. `ai_review_task`：把京东品、淘宝候选、截图路径、SKU字段和策略阈值打成标准审核包。
+5. 调用方 Agent：根据审核包做同款复核、SKU 单位价换算、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。脚本字段只能当提示，最终计算由 Agent 完成。
+6. `save_sourcing`：把京东品和 Agent 审核通过的淘宝货源写回本地库。
+7. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
+8. `export_results` / `export_feishu`：导出 CSV 或飞书表格。导出前会按“同款商品”最终去重，返回的 `count` 才是最终可用商品数。
 
 ## 一个 MCP，所有功能
 
@@ -55,6 +56,7 @@ ecommerce_sourcing({
 | `taobao_extract` | 提取列表 |
 | `taobao_harvest` | 推荐：淘宝逐品供货采集；会把选中 SKU 明显不匹配的候选放入 rejected |
 | **数据** | |
+| `ai_review_task` | 生成 AI 审核任务包；代码不替 Agent 裁决同款、SKU单位价或利润 |
 | `save_sourcing` | 保存京东品和淘宝匹配 |
 | `sourcing_list` | 查看已入库结果和淘宝匹配数量 |
 | `logs` | 查看最近 MCP 操作日志 |
@@ -114,12 +116,16 @@ ecommerce_sourcing({
 - innerText智能解析（标题/价格/销量）
 - 自适应京东/淘宝改版
 
-### 最小规格单价
-自动识别：粒/片/克/毫克/升/毫升
+### AI SKU 换算
+工具会采集标题、SKU、截图和页面字段，也会给出脚本解析提示；但最终同款判断、SKU 换算和利润筛选必须由调用方 Agent 完成。
+
+换算目标：粒/片/克/毫克/升/毫升
 ```
 "60粒 ¥100" → 每粒 ¥1.67
 "500g ¥50" → 每克 ¥0.1
 ```
+
+利润金额必须按等量整件折算。例如京东 120 粒、淘宝 60 粒，要先把淘宝成本折算到 120 粒，再计算单件利润；不能只拿每粒差价当单件利润。
 
 ## 使用示例
 
@@ -144,14 +150,22 @@ ecommerce_sourcing({
   require48h: true
 })
 
-// 3. Agent 完成同款复核、单位价和利润计算后，把匹配结果写回库
+// 3. 生成标准审核包。MCP 不会替 Agent 做最终同款/SKU/利润裁决
+ecommerce_sourcing({
+  action: "ai_review_task",
+  jdProductId: "jd-xxx",
+  keyword: "GNC 辅酶Q10",
+  taobaoCandidates: []
+})
+
+// 4. Agent 根据审核包完成同款复核、单位价和利润计算后，把匹配结果写回库
 ecommerce_sourcing({
   action: "save_sourcing",
   jdProduct: { "productId": "jd-xxx", "title": "...", "price": 398 },
   taobaoMatches: [{ "taobao": { "productId": "tb-xxx", "price": 216 }, "profit": { "profitRate": 0.45, "profitAmount": 182 } }]
 })
 
-// 4. 导出前确认淘宝匹配已经入库
+// 5. 导出前确认淘宝匹配已经入库
 ecommerce_sourcing({ action: "sourcing_list", limit: 20 })
 ```
 
@@ -204,9 +218,9 @@ npm run batch:sourcing -- \
 { "brands": ["GNC", "Nature Made"] }
 ```
 
-批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。最终 `export_results` / `export_feishu` 返回的 `count` 小于目标数时，Agent 继续跑下一批品牌即可。
+批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。注意：批量脚本只负责采集候选并在 `$HOME/.ecommerce-sourcing-agent/review-tasks` 生成 AI 审核任务包，不自动裁决同款、SKU单位价或利润，也不自动保存淘宝匹配。`--target` 表示“已入库达标 + 待 AI 审核任务包”的总量，不表示脚本已自动入库 100 个。Agent 审核任务包后调用 `save_sourcing`，最终 `export_results` / `export_feishu` 返回的 `count` 小于目标数时，Agent 继续跑下一批品牌即可。
 
-排查批量任务时先看日志：`jd_harvest` 会记录买手店列表命中、跳过原因和详情页淘汰原因；`taobao_harvest` 会记录国内发货、48 小时、销量、价格等基础筛选摘要；批量脚本还会记录同款复核、剂量、单位价和利润策略的淘汰原因。
+排查批量任务时先看日志：`jd_harvest` 会记录买手店列表命中、跳过原因和详情页淘汰原因；`taobao_harvest` 会记录国内发货、48 小时、销量、价格等基础筛选摘要；批量脚本会记录每个待 Agent 审核任务包的路径。
 
 京东采集默认带低质量店保护：每个买手店最多进 `maxDetailPerShop=12` 个商品详情；如果连续 `maxConsecutiveCommentRejectsPerShop=8` 个详情评论不达标，会跳过当前店铺继续下一个买手店。需要深挖某个店时可以把这两个参数调大。
 

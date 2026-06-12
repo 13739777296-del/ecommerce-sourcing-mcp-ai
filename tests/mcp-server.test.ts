@@ -45,6 +45,7 @@ describe("ecommerce sourcing MCP server", () => {
     const actionEnum = listed.tools[0].inputSchema.properties.action.enum;
     expect(actionEnum).toContain("jd_harvest");
     expect(actionEnum).toContain("taobao_harvest");
+    expect(actionEnum).toContain("ai_review_task");
     expect(actionEnum).toContain("save_sourcing");
     expect(actionEnum).toContain("sourcing_list");
     expect(actionEnum).toContain("logs");
@@ -56,7 +57,7 @@ describe("ecommerce sourcing MCP server", () => {
 
     const guidePrompt = await server.request("prompts/get", { name: "ecommerce_sourcing_agent_guide" });
     expect(guidePrompt.messages[0].content.text).toContain("只暴露一个 MCP 工具");
-    expect(guidePrompt.messages[0].content.text).toContain("关键节点时，再结合多模态模型交叉验证");
+    expect(guidePrompt.messages[0].content.text).toContain("同款判断、SKU单位价换算、利润筛选必须由调用方 Agent");
     expect(guidePrompt.messages[0].content.text).toContain("save_sourcing");
     expect(guidePrompt.messages[0].content.text).toContain("sourcing_list");
 
@@ -65,6 +66,7 @@ describe("ecommerce sourcing MCP server", () => {
       arguments: { action: "usage_guide" }
     });
     expect(toolJson(guideTool).guide.workflow).toContain("jd_harvest");
+    expect(toolJson(guideTool).guide.workflow).toContain("ai_review_task");
     expect(toolJson(guideTool).guide.workflow).toContain("save_sourcing");
     expect(toolJson(guideTool).guide.workflow).toContain("sourcing_list");
 

@@ -12,6 +12,7 @@ import { profileSummary, createAccount, removeAccount, setAccountStatus, account
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
 import { calculateUnitPrice } from "../lib/unit-price.js";
+import { buildAiReviewTask, dbRowToJdProduct } from "../lib/ai-review-task.js";
 
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
@@ -45,7 +46,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
         "account_list", "account_add", "account_login", "account_check", "account_remove",
-        "sourcing_list", "logs", "export_results", "export_feishu", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
+        "sourcing_list", "logs", "export_results", "export_feishu", "ai_review_task", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "close"
       ],
       description: `操作类型：
@@ -53,7 +54,7 @@ export const parameters = {
         京东单步: jd_search/extract/detail/search_filter
         京东选品(推荐): jd_harvest —— 搜"品牌+买手店"收集买手店名→只搜店名→进详情拿评价→筛评价>=策略门槛
         淘宝单步: taobao_search/search_image/extract
-        数据: save_sourcing/sourcing_list/logs/export_results/export_feishu
+        数据: ai_review_task/save_sourcing/sourcing_list/logs/export_results/export_feishu
         批量: batch_guide 查看批量选品脚本和断点续跑方式
         关闭: close`
     },
@@ -173,7 +174,15 @@ export const parameters = {
     },
     jdProduct: {
       type: "object",
-      description: "save_sourcing用：京东品(需含productId/title/price/shop/shopType等)"
+      description: "ai_review_task/save_sourcing用：京东品(需含productId/title/price/shop/shopType等)"
+    },
+    jdProductId: {
+      type: "string",
+      description: "ai_review_task用：从本地库读取已保存的京东候选"
+    },
+    taobaoCandidates: {
+      type: "array",
+      description: "ai_review_task用：taobao_harvest返回的淘宝候选数组，由Agent做同款/SKU/利润审核"
     },
     taobaoMatches: {
       type: "array",
@@ -391,13 +400,14 @@ export async function handler(ctx, db, input) {
         guide: {
           name: "电商选品MCP",
           description: "一套通用AI驱动选品引擎。京东找买手店候选 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
-          workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → Agent同款匹配+核算利润 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
+          workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
               { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },
               { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
             ],
             data: [
+              { name: "ai_review_task", desc: "生成AI审核任务包：只给证据、策略和输出格式，不由脚本裁决同款、SKU单位价或利润", params: "jdProduct或jdProductId, taobaoCandidates, keyword, strategyId" },
               { name: "save_sourcing", desc: "Agent匹配后存库：京东品+淘宝匹配列表→入库，供导出用", params: "jdProduct, taobaoMatches, strategyId" },
               { name: "sourcing_list", desc: "查看当前已入库的京东候选和淘宝匹配数量，适合断点续跑或导出前确认", params: "limit" },
               { name: "logs", desc: "查看最近 MCP 操作日志，排查哪一步失败或是否已经入库", params: "limit" },
@@ -424,9 +434,10 @@ export async function handler(ctx, db, input) {
             "禁售品牌在策略库 riskControl.bannedBrands 里配置，命中后不启动采集、不入库。",
             "jd_harvest会先保存京东候选；返回后，Agent必须从标题提取'品牌+核心品名'（别带规格），再调用taobao_harvest。",
             "taobao_harvest只返回通过基础规则的淘宝候选；如果 selectedSkuRejectReason 不为空，该候选会进入 rejected，Agent不要拿它入库",
+            "taobao_harvest之后建议先调用ai_review_task生成审核包。最终同款复核、SKU单位价和利润计算必须由Agent/AI根据标题、SKU、截图和页面字段完成，脚本字段只能当提示。",
             "Agent完成同款复核、单位价和利润计算后，必须调用save_sourcing把匹配结果写回库",
             "导出前建议调用sourcing_list确认 taobaoMatchCount 是否大于0；如果全是0，说明还只存了京东候选，没完成淘宝匹配入库",
-            "Agent负责清洗: 算最小规格单价、同款去重、按策略利润筛选(默认35%-60%且最低20元)。",
+            "Agent负责清洗: 算最小规格单价、同款去重、按策略利润筛选(默认35%-60%且最低20元)。代码不会替Agent做最终裁决。",
             "最终CSV/飞书导出会再次按品牌+核心品名+剂量做同款去重，导出count就是最终去重后的商品数；如果没达标，Agent继续跑下一批即可。",
             "筛选逻辑从策略引擎读取(loadStrategyDefaults)，改策略文件即生效",
             "浏览器永不关闭(避免风控)，账号存本机(用户隔离)",
@@ -442,7 +453,7 @@ export async function handler(ctx, db, input) {
         ok: true,
         action,
         guide: {
-          purpose: "批量跑选品长任务，适合“最终找满100个不重复可用品”。脚本调用同一个 MCP 工具入口，仍然使用本机正式 Chrome 和账号池。",
+          purpose: "批量采集选品候选，适合为“最终找满100个不重复可用品”持续生成待AI审核任务包。脚本调用同一个 MCP 工具入口，仍然使用本机正式 Chrome 和账号池；最终同款/SKU/利润由调用方Agent审核。",
           command: "npm run batch:sourcing -- --target=100 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --maxShopsPerBrand=8 --maxDetailPerShop=12 --maxConsecutiveCommentRejectsPerShop=8 --exportFeishu=true",
           brandQueueFormat: [
             "JSON 数组: [\"GNC\", \"Nature Made\"]",
@@ -451,7 +462,14 @@ export async function handler(ctx, db, input) {
           dedupe: [
             "最终计数不是简单京东ID计数，而是按品牌+核心品名+剂量生成商品指纹。",
             "CSV 和飞书导出也使用同一套最终去重逻辑。",
-            "如果 export_results/export_feishu 返回的 count 小于目标数，Agent 应继续执行下一批品牌。"
+            "批量脚本只生成 review-task JSON，不会自动写入淘宝匹配；如果 export_results/export_feishu 返回的 count 小于目标数，Agent 应审核更多任务包并继续执行下一批品牌。",
+            "真正通过/淘汰、单位价、利润仍由调用方Agent审核后save_sourcing。"
+          ],
+          reviewTasks: [
+            "任务包默认保存到 $HOME/.ecommerce-sourcing-agent/review-tasks。",
+            "每个任务包包含一个京东候选、淘宝候选、截图路径、策略阈值和输出格式。",
+            "Agent读取任务包后亲自做同款判断、SKU换算和利润计算，确认后调用save_sourcing。",
+            "--target 现在表示“已达标可用品 + 待AI审核任务包”的总量，不表示脚本已自动入库100个。"
           ],
           safeRun: [
             "遇到验证码、安全验证、访问频繁、登录失效会停止，由 Agent 通知用户处理。",
@@ -601,6 +619,31 @@ export async function handler(ctx, db, input) {
     // ===== 关闭（不真关浏览器，避免反复开闭触发风控）=====
     if (action === "close") {
       return { ok: true, action, message: "浏览器保持打开（不关闭以避免风控）" };
+    }
+
+    // ===== 生成AI审核任务包：代码只给证据，不替Agent裁决同款/SKU/利润 =====
+    if (action === "ai_review_task") {
+      const st = loadStrategyDefaults(db, input.strategyId);
+      let jd = input.jdProduct || null;
+      if (!jd && input.jdProductId) {
+        const row = db.getSourcingResult(input.jdProductId);
+        if (!row) return { ok: false, action, message: `本地库没有这个京东候选：${input.jdProductId}` };
+        jd = dbRowToJdProduct(row);
+      }
+      if (!jd?.productId && !jd?.jdProductId) return { ok: false, action, message: "缺少 jdProduct 或 jdProductId" };
+      const task = buildAiReviewTask({
+        jdProduct: jd,
+        taobaoCandidates: input.taobaoCandidates || [],
+        keyword: input.keyword || "",
+        strategy: st.strategy
+      });
+      safeAddLog(db, "info", `ai_review_task 已生成：jd=${task.jdProduct.productId}，淘宝候选 ${task.taobaoCandidates.length} 条，等待Agent审核`);
+      return {
+        ok: true,
+        action,
+        task,
+        message: `已生成AI审核任务包：京东1个，淘宝候选${task.taobaoCandidates.length}个。下一步由Agent/多模态模型换算SKU和利润，再调用save_sourcing。`
+      };
     }
 
     // ===== Agent匹配后存库（京东品+淘宝匹配列表→入库）=====
@@ -887,7 +930,8 @@ export async function handler(ctx, db, input) {
           "读取 candidates 或 suggestedTaobaoTasks。",
           "对每个京东候选提取品牌名 + 核心品名，去掉规格、瓶数、营销词。",
           "逐个调用 ecommerce_sourcing({ action:'taobao_harvest', keyword:'品牌 核心品名' })。",
-          "拿京东候选和淘宝候选做同款复核、单位价比价、利润筛选，再调用 save_sourcing 入库。"
+          "调用 ecommerce_sourcing({ action:'ai_review_task', jdProduct, taobaoCandidates }) 生成审核包。",
+          "由Agent/多模态模型亲自做同款复核、SKU单位价换算、利润筛选，再调用 save_sourcing 入库。"
         ],
         suggestedTaobaoTasks,
         agentInstructions: buildJdCleaningInstructions(candidates.length, st),
@@ -953,7 +997,8 @@ export async function handler(ctx, db, input) {
         agentNextActions: [
           "把本次 taobao_harvest 的 candidates 与对应京东候选做同款复核。",
           "优先使用 title + skuInfo + screenshotPath 交叉判断，不要只按标题相似。",
-          "按最小规格单位价计算利润，达标后调用 save_sourcing 写入京东品和淘宝匹配。",
+          "建议先调用 ai_review_task 生成标准审核包。",
+          "由Agent/多模态模型按最小规格单位价计算利润，达标后调用 save_sourcing 写入京东品和淘宝匹配。",
           "如没有同款，回到京东候选列表换下一个品。"
         ],
         agentInstructions: buildTaobaoCleaningInstructions(result.candidates.length, st),

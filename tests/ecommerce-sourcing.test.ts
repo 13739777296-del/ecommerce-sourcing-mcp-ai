@@ -806,6 +806,87 @@ describe("ecommerce sourcing core", () => {
     expect(logs.logs.some((log: { message: string }) => log.message.includes("save_sourcing 已入库"))).toBe(true);
   });
 
+  it("returns an AI review task instead of script-calculated SKU and profit decisions", async () => {
+    const dataDir = tempDir();
+    const ctx = testContext(dataDir);
+
+    const result = await sourcingExecute({
+      action: "ai_review_task",
+      keyword: "NYO3 深海鱼油",
+      jdProduct: {
+        productId: "jd-review-1",
+        title: "NYO3挪威进口97%高纯度含量rTG型深海鱼油 120粒*1瓶",
+        price: 188.1,
+        unitPrice: 1.5675,
+        unit: "粒",
+        shop: "康悦全球买手店",
+        shopType: "buyer",
+        skuInfo: "120粒*1瓶",
+        screenshotPath: "/tmp/jd-review-1.png"
+      },
+      taobaoCandidates: [{
+        productId: "tb-review-1",
+        title: "NYO3挪威进口97%高纯度深海鱼油120粒",
+        price: 120,
+        unitPrice: 1,
+        unit: "粒",
+        sales: "100+人付款",
+        isDomestic: true,
+        shipHours: 24,
+        skuInfo: "120粒",
+        screenshotPath: "/tmp/tb-review-1.png"
+      }]
+    }, ctx);
+
+    expect(result.ok).toBe(true);
+    expect(result.task).toMatchObject({
+      taskType: "ai_sku_profit_review",
+      decisionOwner: "calling_agent",
+      keyword: "NYO3 深海鱼油"
+    });
+    expect(result.task).not.toHaveProperty("matches");
+    expect(result.task.taobaoCandidates[0].parserHints.note).toContain("不可作为最终裁决");
+    expect(result.task.instructions.join(" ")).toContain("不要让脚本替你裁决");
+    expect(result.task.instructions.join(" ")).toContain("按等量整件折算");
+    expect(result.task.outputContract.jsonShape.taobaoMatches[0].review).toHaveProperty("skuCalculation");
+  });
+
+  it("can build an AI review task from a stored JD-only candidate", async () => {
+    const dataDir = tempDir();
+    const db = openSourcingDb({ dataDir });
+
+    try {
+      db.saveSourcing({
+        productId: "jd-stored-review-1",
+        title: "GNC 辅酶Q10 100mg 60粒",
+        price: 268,
+        unitPrice: 4.47,
+        unit: "粒",
+        comments: "20",
+        shop: "京东买手店",
+        shopType: "buyer",
+        brand: "GNC",
+        skuInfo: "60粒",
+        url: "https://item.jd.com/stored-review-1.html"
+      }, [], null, { id: "no-source-arbitrage" });
+    } finally {
+      db.close();
+    }
+
+    const result = await sourcingExecute({
+      action: "ai_review_task",
+      jdProductId: "jd-stored-review-1",
+      taobaoCandidates: []
+    }, testContext(dataDir));
+
+    expect(result.ok).toBe(true);
+    expect(result.task.jdProduct).toMatchObject({
+      productId: "jd-stored-review-1",
+      title: "GNC 辅酶Q10 100mg 60粒"
+    });
+    expect(result.task.saveInstruction).toContain("save_sourcing");
+  });
+
   it("blocks banned-brand rows at the final save_sourcing entrypoint", async () => {
     const dataDir = tempDir();
     const ctx = testContext(dataDir);

@@ -484,7 +484,7 @@ export async function handler(ctx, db, input) {
         action,
         guide: {
           purpose: "批量采集选品候选，适合为“最终找满100个不重复可用品”持续生成待AI审核任务包。脚本调用同一个 MCP 工具入口，仍然使用本机正式 Chrome 和账号池；最终同款/SKU/利润由调用方Agent审核。",
-          command: "npm run batch:sourcing -- --target=100 --maxPendingReviews=30 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --maxShopsPerBrand=8 --maxDetailPerShop=12 --maxConsecutiveCommentRejectsPerShop=8 --exportFeishu=true",
+          command: "npm run batch:sourcing -- --target=100 --maxPendingReviews=30 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --jdAccountId=$JD_ACCOUNT_ID --taobaoAccountId=$TAOBAO_ACCOUNT_ID --maxShopsPerBrand=8 --maxDetailPerShop=12 --maxConsecutiveCommentRejectsPerShop=8 --exportFeishu=true",
           brandQueueFormat: [
             "JSON 数组: [\"GNC\", \"Nature Made\"]",
             "或对象: { \"brands\": [\"GNC\", \"Nature Made\"] }"
@@ -500,7 +500,8 @@ export async function handler(ctx, db, input) {
             "每个任务包包含一个京东候选、淘宝候选、截图路径、策略阈值和输出格式。",
             "Agent读取任务包后亲自做同款判断、SKU换算和利润计算，确认后调用save_sourcing。",
             "--target 表示真正已经save_sourcing入库且利润达标的去重可用品数量；待AI审核任务不计入target。",
-            "--maxPendingReviews 控制未审核任务包上限，达到后暂停采集，避免积压大量未审核候选。"
+            "--maxPendingReviews 控制未审核任务包上限，达到后暂停采集，避免积压大量未审核候选。",
+            "--jdAccountId / --taobaoAccountId 可指定本轮批量使用的账号；为空时仍走账号池自动选择。"
           ],
           safeRun: [
             "遇到验证码、安全验证、访问频繁、登录失效会停止，由 Agent 通知用户处理。",

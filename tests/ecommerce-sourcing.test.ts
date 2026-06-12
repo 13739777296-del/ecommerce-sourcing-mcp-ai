@@ -1040,6 +1040,8 @@ describe("ecommerce sourcing core", () => {
     expect(guide.command).toContain("npm run batch:sourcing");
     expect(guide.command).toContain("--maxShopsPerBrand=8");
     expect(guide.command).toContain("--maxPendingReviews=30");
+    expect(guide.command).toContain("--jdAccountId=");
+    expect(guide.command).toContain("--taobaoAccountId=");
     expect(guide.dedupe.join(" ")).toContain("最终去重");
     expect(guide.reviewTasks.join(" ")).toContain("待AI审核任务不计入target");
     expect(guide.reviewTasks.join(" ")).not.toContain("已达标可用品 + 待AI审核任务包");

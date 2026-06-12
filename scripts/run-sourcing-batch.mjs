@@ -26,6 +26,8 @@ const taobaoMaxCount = numberArg(args.taobaoMaxCount, 30);
 const taobaoMaxDetail = numberArg(args.taobaoMaxDetail, 8);
 const maxKeywordsPerJd = numberArg(args.maxKeywordsPerJd, 2);
 const maxPendingReviews = numberArg(args.maxPendingReviews, 30);
+const jdAccountId = stringArg(args.jdAccountId);
+const taobaoAccountId = stringArg(args.taobaoAccountId);
 const strategy = DEFAULT_STRATEGIES["no-source-arbitrage"];
 const ctx = { dataDir, config: { get: () => "" }, log: console };
 const sleepMs = numberArg(args.sleepMs, 1500);
@@ -45,6 +47,7 @@ process.on("SIGINT", () => {
 console.log(`[batch] dataDir=${dataDir}`);
 console.log(`[batch] reviewTasks=${reviewOutputDir}`);
 console.log(`[batch] brands=${brandQueue.length}, target=${target}, maxPendingReviews=${maxPendingReviews}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}, maxShopsPerBrand=${maxShopsPerBrand}, maxDetailPerShop=${maxDetailPerShop}`);
+console.log(`[batch] accounts=${jdAccountId ? `jd:${jdAccountId}` : "jd:auto"}, ${taobaoAccountId ? `taobao:${taobaoAccountId}` : "taobao:auto"}`);
 
 const initialCount = qualifiedCount();
 console.log(`[batch] 当前已达标可用品: ${initialCount}，待AI审核任务: ${pendingReviewCount(state)}`);
@@ -76,6 +79,7 @@ for (const brand of brandQueue) {
   const jdResult = await execute({
     action: "jd_harvest",
     brand,
+    accountId: jdAccountId || undefined,
     allowedBrands: brandQueue,
     targetCount: jdTargetPerBrand,
     maxPagesPerShop,
@@ -135,6 +139,7 @@ for (const brand of brandQueue) {
       const tbResult = await execute({
         action: "taobao_harvest",
         keyword,
+        accountId: taobaoAccountId || undefined,
         maxCount: taobaoMaxCount,
         maxDetail: taobaoMaxDetail
       }, ctx);
@@ -323,6 +328,10 @@ function parseArgs(argv) {
 function numberArg(value, fallback) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+}
+
+function stringArg(value) {
+  return String(value || "").trim();
 }
 
 function sleep(ms) {

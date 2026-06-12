@@ -26,6 +26,32 @@ afterEach(async () => {
 });
 
 describe("ecommerce sourcing MCP server", () => {
+  it("rejects an explicit harvest account when the platform does not match", async () => {
+    const dataDir = tempDir("ecommerce-sourcing-account-route-");
+    const { execute } = await import("../tools/sourcing.js");
+    const ctx = {
+      dataDir,
+      config: { get: () => join(dataDir, "legacy-profiles") },
+      log: console
+    };
+
+    const added = await execute({
+      action: "account_add",
+      platform: "taobao",
+      displayName: "淘宝测试账号"
+    }, ctx);
+
+    const result = await execute({
+      action: "jd_harvest",
+      brand: "GNC",
+      accountId: added.account.id,
+      targetCount: 1
+    }, ctx);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("账号平台不匹配");
+  });
+
   it("initializes, lists the all-in-one tool, and calls safe actions over stdio", async () => {
     const dataDir = tempDir("ecommerce-sourcing-mcp-");
     server = new McpTestClient(dataDir);

@@ -9,6 +9,7 @@
 ecommerce_sourcing({ 
   action: "jd_harvest",
   brand: "GNC",
+  accountId: "可选京东账号ID",
   targetCount: 5,
   strategyId: "no-source-arbitrage"
 })
@@ -16,13 +17,14 @@ ecommerce_sourcing({
 
 推荐工作流：
 1. `jd_harvest`：先用“品牌 + 买手店”收集买手店名，再只搜买手店名。批量脚本会传入品牌表作为 `allowedBrands`，买手店页里命中任一可用品牌的商品都可进入详情页复核评论数、SKU、主图和价格，并先入库。
-2. 调用方 Agent：从京东候选标题里提取品牌名 + 核心品名，去掉规格、瓶数、营销词。
-3. `taobao_harvest`：用 Agent 清洗后的关键词逐品去淘宝找供货，筛国内发货、48 小时内发货、销量门槛。前几次搜索必须保留品牌词，不能直接用“美国原装进口 + 品类”这类泛词。
-4. `ai_review_task`：把京东品、淘宝候选、截图路径、SKU字段和策略阈值打成标准审核包。
-5. 调用方 Agent：根据审核包做同款复核、SKU 单位价换算、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。脚本字段只能当提示，最终计算由 Agent 完成。
-6. `save_sourcing`：把京东品和 Agent 审核通过的淘宝货源写回本地库。
-7. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
-8. `export_results` / `export_feishu`：导出 CSV 或飞书表格。导出前会按“同款商品”最终去重，返回的 `count` 才是最终可用商品数。
+2. 多账号可用时，采集和单步搜索可传 `accountId` 指定本次使用哪个账号；账号平台不匹配会直接拒绝，不会打开浏览器。
+3. 调用方 Agent：从京东候选标题里提取品牌名 + 核心品名，去掉规格、瓶数、营销词。
+4. `taobao_harvest`：用 Agent 清洗后的关键词逐品去淘宝找供货，筛国内发货、48 小时内发货、销量门槛。前几次搜索必须保留品牌词，不能直接用“美国原装进口 + 品类”这类泛词。
+5. `ai_review_task`：把京东品、淘宝候选、截图路径、SKU字段和策略阈值打成标准审核包。
+6. 调用方 Agent：根据审核包做同款复核、SKU 单位价换算、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。脚本字段只能当提示，最终计算由 Agent 完成。
+7. `save_sourcing`：把京东品和 Agent 审核通过的淘宝货源写回本地库。
+8. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
+9. `export_results` / `export_feishu`：导出 CSV 或飞书表格。导出前会按“同款商品”最终去重，返回的 `count` 才是最终可用商品数。
 
 ## 一个 MCP，所有功能
 
@@ -136,6 +138,7 @@ ecommerce_sourcing({
 ecommerce_sourcing({
   action: "jd_harvest",
   brand: "GNC",
+  accountId: "可选京东账号ID",
   targetCount: 5,
   strategyId: "no-source-arbitrage"
 })
@@ -144,6 +147,7 @@ ecommerce_sourcing({
 ecommerce_sourcing({
   action: "taobao_harvest",
   keyword: "GNC 辅酶Q10",
+  accountId: "可选淘宝账号ID",
   strategyId: "no-source-arbitrage",
   minSales: 10,
   requireDomestic: true,

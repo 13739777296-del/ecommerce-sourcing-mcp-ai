@@ -80,7 +80,7 @@ export const parameters = {
     },
     accountId: {
       type: "string",
-      description: "账号管理用：account_login/check/remove 指定账号ID"
+      description: "账号管理和采集执行用：account_login/check/remove 指定账号ID；jd_harvest/taobao_harvest/单步搜索可指定使用某个已登录账号"
     },
     displayName: {
       type: "string",
@@ -194,7 +194,36 @@ export const parameters = {
 
 // 工作前登录预检：遍历该平台所有账号，用第一个真正登录的。
 // 全部不可用才报错(提示扫码)。这样掉登录的账号会被自动跳过，不卡工作。
-async function openSessionChecked(ctx, db, platform) {
+async function openSessionChecked(ctx, db, platform, accountId = null) {
+  if (accountId) {
+    const account = db.getAccount(accountId);
+    if (!account) {
+      const err = new Error(`账号不存在：${accountId}`);
+      err.code = "NOT_LOGGED_IN";
+      err.accountId = accountId;
+      throw err;
+    }
+    if (account.platform !== platform) {
+      const expected = platform === "jd" ? "京东" : "淘宝";
+      const actual = account.platform === "jd" ? "京东" : "淘宝";
+      throw new Error(`账号平台不匹配：当前操作需要${expected}账号，但传入的是${actual}账号。`);
+    }
+    if (account.status === "available") {
+      console.log(`[预检] 使用调用方指定账号「${account.displayName}」`);
+      return await openAiSessionWithAccount(ctx, db, platform, "about:blank", account.id);
+    }
+    const probe = await probeAccountLoginStatus(account);
+    setAccountStatus(db, account.id, probe.status, probe.event);
+    if (probe.status === "available") {
+      console.log(`[预检] 指定账号「${account.displayName}」已恢复可用，开始工作`);
+      return await openAiSessionWithAccount(ctx, db, platform, "about:blank", account.id);
+    }
+    const err = new Error(`指定账号不可用：${account.displayName}（${probe.event}）`);
+    err.code = "NOT_LOGGED_IN";
+    err.accountId = account.id;
+    throw err;
+  }
+
   const accounts = db.listAccounts(platform);
   if (!accounts.length) {
     const err = new Error(`没有${platform === "jd" ? "京东" : "淘宝"}账号，请先 account_add 再 account_login。`);
@@ -403,8 +432,8 @@ export async function handler(ctx, db, input) {
           workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
-              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },
-              { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
+              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, accountId(可选指定账号), targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },
+              { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, accountId(可选指定账号), minSales(默认10), requireDomestic, require48h" },
             ],
             data: [
               { name: "ai_review_task", desc: "生成AI审核任务包：只给证据、策略和输出格式，不由脚本裁决同款、SKU单位价或利润", params: "jdProduct或jdProductId, taobaoCandidates, keyword, strategyId" },
@@ -431,6 +460,7 @@ export async function handler(ctx, db, input) {
           },
           tips: [
             "京东第一段搜'品牌+买手店'(如GNC 买手店)找买手店名；第二段只搜买手店名，不拼产品名。批量脚本会传入allowedBrands，买手店页里命中任一可用品牌的商品都可进入详情。",
+            "多个账号可用时，调用方可在 jd_harvest / taobao_harvest / 单步搜索里传 accountId，明确指定本次使用哪个账号；账号平台不匹配会直接拒绝，不会打开浏览器。",
             "禁售品牌在策略库 riskControl.bannedBrands 里配置，命中后不启动采集、不入库。",
             "jd_harvest会先保存京东候选；返回后，Agent必须从标题提取'品牌+核心品名'（别带规格），再调用taobao_harvest。",
             "taobao_harvest只返回通过基础规则的淘宝候选；如果 selectedSkuRejectReason 不为空，该候选会进入 rejected，Agent不要拿它入库",
@@ -765,7 +795,7 @@ export async function handler(ctx, db, input) {
     // ===== 京东单步操作 =====
     if (action === "jd_search") {
       if (!input.keyword) return { ok: false, message: "缺少关键词" };
-      const session = await openAiSessionWithAccount(ctx, db, "jd");
+      const session = await openAiSessionWithAccount(ctx, db, "jd", "about:blank", input.accountId || null);
       const result = await aiJdSearch(session.page, input.keyword, { platform: "jd", account: session.account });
       return {
         ok: true,
@@ -778,7 +808,7 @@ export async function handler(ctx, db, input) {
     }
 
     if (action === "jd_extract") {
-      const session = await openAiSessionWithAccount(ctx, db, "jd");
+      const session = await openAiSessionWithAccount(ctx, db, "jd", "about:blank", input.accountId || null);
       const products = await aiExtractJdProducts(session.page, input.maxCount || 10);
       return {
         ok: true,
@@ -790,7 +820,7 @@ export async function handler(ctx, db, input) {
     }
 
     if (action === "jd_detail") {
-      const session = await openAiSessionWithAccount(ctx, db, "jd");
+      const session = await openAiSessionWithAccount(ctx, db, "jd", "about:blank", input.accountId || null);
       const click = await aiClickProduct(session.page, input.productIndex || 0);
       const detail = await aiExtractJdDetail(click.page);
       return {
@@ -807,7 +837,7 @@ export async function handler(ctx, db, input) {
       const strategy = input.strategy || DEFAULT_STRATEGIES[input.strategyId] || DEFAULT_STRATEGIES["no-source-arbitrage"];
       const bannedKeyword = keywordBannedByStrategy(input.keyword, strategy);
       if (bannedKeyword) return { ...bannedKeyword, action };
-      const session = await openAiSessionWithAccount(ctx, db, "jd");
+      const session = await openAiSessionWithAccount(ctx, db, "jd", "about:blank", input.accountId || null);
       await aiJdSearch(session.page, input.keyword, { platform: "jd", account: session.account });
       const products = await aiExtractJdProducts(session.page, input.maxCount || 30);
       const evaluated = products.map(p => {
@@ -839,7 +869,7 @@ export async function handler(ctx, db, input) {
       }
       safeAddLog(db, "info", `jd_harvest 开始：brand=${brand} target=${input.targetCount || 10}`);
 
-      const session = await openSessionChecked(ctx, db, "jd");
+      const session = await openSessionChecked(ctx, db, "jd", input.accountId || null);
       let result;
       const savedIds = new Set();
       const saveErrors = [];
@@ -951,7 +981,7 @@ export async function handler(ctx, db, input) {
         return { ...bannedKeyword, action, keyword: input.keyword };
       }
       safeAddLog(db, "info", `taobao_harvest 开始：keyword=${input.keyword}`);
-      const session = await openSessionChecked(ctx, db, "taobao");
+      const session = await openSessionChecked(ctx, db, "taobao", input.accountId || null);
       let result;
       try {
         result = await aiTaobaoHarvest(session.page, input.keyword, {
@@ -1009,7 +1039,7 @@ export async function handler(ctx, db, input) {
 
     if (action === "taobao_search") {
       if (!input.keyword) return { ok: false, message: "缺少关键词" };
-      const session = await openAiSessionWithAccount(ctx, db, "taobao");
+      const session = await openAiSessionWithAccount(ctx, db, "taobao", "about:blank", input.accountId || null);
       const result = await aiTaobaoSearch(session.page, input.keyword);
       return {
         ok: true,
@@ -1022,7 +1052,7 @@ export async function handler(ctx, db, input) {
 
     if (action === "taobao_search_image") {
       if (!input.imageUrl) return { ok: false, message: "缺少图片URL" };
-      const session = await openAiSessionWithAccount(ctx, db, "taobao");
+      const session = await openAiSessionWithAccount(ctx, db, "taobao", "about:blank", input.accountId || null);
       const result = await aiTaobaoSearchByImage(session.page, input.imageUrl);
       return {
         ok: true,
@@ -1034,7 +1064,7 @@ export async function handler(ctx, db, input) {
     }
 
     if (action === "taobao_extract") {
-      const session = await openAiSessionWithAccount(ctx, db, "taobao");
+      const session = await openAiSessionWithAccount(ctx, db, "taobao", "about:blank", input.accountId || null);
       const products = await aiExtractTaobaoProducts(session.page, input.maxCount || 10);
       return {
         ok: true,

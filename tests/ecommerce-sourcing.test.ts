@@ -18,7 +18,7 @@ import { openSourcingDb } from "../lib/db.js";
 import { exportToFeishu } from "../lib/feishu.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
-import { compactSessionTabs, extractJdSearchKeyword, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
+import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -72,6 +72,31 @@ describe("ecommerce sourcing core", () => {
 
     expect(keywords.every((keyword) => /nyo3/i.test(keyword))).toBe(true);
     expect(keywords).not.toContain("鱼油");
+  });
+
+  it("keeps Taobao list items for detail verification when 48h shipping is unknown", () => {
+    const filtered = filterTaobaoProductsForHarvest([
+      {
+        productId: "tb-unknown-48h",
+        title: "VEDONON 维多能 深海鱼油软胶囊",
+        isDomestic: true,
+        shipFrom: "浙江",
+        ship48h: false,
+        ship48hKnown: false,
+        salesNum: 1000,
+        price: "210",
+        url: "https://item.taobao.com/item.htm?id=tb-unknown-48h"
+      }
+    ], {
+      requireDomestic: true,
+      require48h: true,
+      minSales: 10,
+      priceMin: 1,
+      priceMax: 999999
+    });
+
+    expect(filtered.matches).toHaveLength(1);
+    expect(filtered.skipped.slowShipping).toBe(0);
   });
 
   it("keeps multi-word brands compact in Taobao keywords", () => {

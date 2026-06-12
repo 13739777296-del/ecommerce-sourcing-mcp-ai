@@ -26,8 +26,8 @@ const taobaoMaxCount = numberArg(args.taobaoMaxCount, 30);
 const taobaoMaxDetail = numberArg(args.taobaoMaxDetail, 8);
 const maxKeywordsPerJd = numberArg(args.maxKeywordsPerJd, 2);
 const maxPendingReviews = numberArg(args.maxPendingReviews, 30);
-const jdAccountId = stringArg(args.jdAccountId);
-const taobaoAccountId = stringArg(args.taobaoAccountId);
+let jdAccountId = stringArg(args.jdAccountId);
+let taobaoAccountId = stringArg(args.taobaoAccountId);
 const strategy = DEFAULT_STRATEGIES["no-source-arbitrage"];
 const ctx = { dataDir, config: { get: () => "" }, log: console };
 const sleepMs = numberArg(args.sleepMs, 1500);
@@ -106,7 +106,16 @@ for (const brand of brandQueue) {
   if (!jdResult.ok) {
     console.log(`[batch] JD 失败: ${jdResult.message || jdResult.error}`);
     if (shouldStopForRisk(jdResult)) {
-      console.log("[batch] 检测到需要人工处理的风险/登录问题，停止批量。");
+      // 账号封控/风控：失败账号已被 setAccountStatus 标记 paused。
+      // 自动切换——清掉固定账号(改走账号池轮换到其它可用账号)，本品牌不标完成，下一轮重试。
+      jdAccountId = "";
+      const left = availableAccountCount("jd");
+      if (left > 0) {
+        console.log(`[batch] 京东账号疑似封控，已暂停该账号；剩余 ${left} 个可用京东账号，自动切换后重试本品牌。`);
+        await sleep(restMs); // 切换前长歇一下，降低连环风控
+        continue; // 不 push completedBrands，重试同一品牌(会用轮换选到的新账号)
+      }
+      console.log("[batch] 所有京东账号都已封控/不可用，停止批量，等待人工处理。");
       break;
     }
     state.completedBrands.push(brand);
@@ -143,6 +152,7 @@ for (const brand of brandQueue) {
       const tbResult = await execute({
         action: "taobao_harvest",
         keyword,
+        brand: brandName,
         accountId: taobaoAccountId || undefined,
         maxCount: taobaoMaxCount,
         maxDetail: taobaoMaxDetail
@@ -164,6 +174,14 @@ for (const brand of brandQueue) {
       if (!tbResult.ok) {
         console.log(`[batch] 淘宝失败: ${tbResult.message || tbResult.error}`);
         if (shouldStopForRisk(tbResult)) {
+          taobaoAccountId = "";
+          const left = availableAccountCount("taobao");
+          if (left > 0) {
+            console.log(`[batch] 淘宝账号疑似封控，已暂停该账号；剩余 ${left} 个可用淘宝账号，后续自动切换。`);
+            await sleep(restMs);
+            break; // 退出当前品牌的关键词循环，下个候选/品牌会用轮换到的新账号
+          }
+          console.log("[batch] 所有淘宝账号都已封控/不可用，停止批量。");
           stopping = true;
           break;
         }
@@ -324,6 +342,18 @@ function sanitizeFilePart(value) {
 function shouldStopForRisk(result) {
   const text = `${result.message || ""} ${result.error || ""}`;
   return Boolean(result.risk || result.needLogin || /验证码|安全验证|访问频繁|风控|未登录|登录/.test(text));
+}
+
+// 统计某平台当前可用(available)账号数。封控的账号会被 setAccountStatus 标记 paused，从而不计入。
+function availableAccountCount(platform) {
+  try {
+    const db = openSourcingDb({ dataDir });
+    const n = db.listAccounts(platform).filter((a) => a.status === "available").length;
+    db.close?.();
+    return n;
+  } catch {
+    return 0;
+  }
 }
 
 function parseArgs(argv) {

@@ -7,7 +7,7 @@ import { DEFAULT_STRATEGIES, evaluateWithStrategy } from "../lib/strategy-engine
 import {
   assessSameProductMatch,
   buildTaobaoSearchKeywords,
-  extractBrand
+  resolveBrandForTaobao
 } from "../lib/logic.js";
 import { compareUnitPrice } from "../lib/unit-price.js";
 import { buildJdProductFingerprint } from "../lib/sourcing-dedupe.js";
@@ -21,6 +21,8 @@ const brandLimit = numberArg(args.brandLimit, 0);
 const jdTargetPerBrand = numberArg(args.jdTargetPerBrand, 3);
 const maxPagesPerShop = numberArg(args.maxPagesPerShop, 1);
 const maxShopsPerBrand = numberArg(args.maxShopsPerBrand, 8);
+const maxDetailPerShop = numberArg(args.maxDetailPerShop, 12);
+const maxConsecutiveCommentRejectsPerShop = numberArg(args.maxConsecutiveCommentRejectsPerShop, 8);
 const taobaoMaxCount = numberArg(args.taobaoMaxCount, 30);
 const taobaoMaxDetail = numberArg(args.taobaoMaxDetail, 8);
 const maxKeywordsPerJd = numberArg(args.maxKeywordsPerJd, 2);
@@ -41,7 +43,7 @@ process.on("SIGINT", () => {
 });
 
 console.log(`[batch] dataDir=${dataDir}`);
-console.log(`[batch] brands=${brandQueue.length}, target=${target}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}, maxShopsPerBrand=${maxShopsPerBrand}`);
+console.log(`[batch] brands=${brandQueue.length}, target=${target}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}, maxShopsPerBrand=${maxShopsPerBrand}, maxDetailPerShop=${maxDetailPerShop}`);
 
 const initialCount = qualifiedCount();
 console.log(`[batch] 当前已达标可用品: ${initialCount}`);
@@ -72,7 +74,9 @@ for (const brand of brandQueue) {
     allowedBrands: brandQueue,
     targetCount: jdTargetPerBrand,
     maxPagesPerShop,
-    maxShopsPerBrand
+    maxShopsPerBrand,
+    maxDetailPerShop,
+    maxConsecutiveCommentRejectsPerShop
   }, ctx);
 
   state.runs.push({
@@ -111,7 +115,7 @@ for (const brand of brandQueue) {
     }
 
     console.log(`[batch] JD候选: ${jd.productId} ${short(jd.title, 42)}`);
-    const brandName = jd.brand || jd.matchedBrand || extractBrand(jd.title) || brand;
+    const brandName = resolveBrandForTaobao(jd, brand);
     const keywords = buildTaobaoSearchKeywords({ brand: brandName, title: jd.title }).slice(0, maxKeywordsPerJd);
     let saved = false;
 
@@ -433,7 +437,7 @@ function saveState(file, state) {
 
 function shouldStopForRisk(result) {
   const text = `${result.message || ""} ${result.error || ""}`;
-  return Boolean(result.needLogin || /验证码|安全验证|访问频繁|风控|未登录|登录/.test(text));
+  return Boolean(result.risk || result.needLogin || /验证码|安全验证|访问频繁|风控|未登录|登录/.test(text));
 }
 
 function parseArgs(argv) {

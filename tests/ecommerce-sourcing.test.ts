@@ -10,6 +10,7 @@ import {
   coreProductMatched,
   parseCommentCount,
   parseSalesCount,
+  resolveBrandForTaobao,
   taobaoSelectedSkuRejectReason,
   taobaoRejectReason
 } from "../lib/logic.js";
@@ -17,7 +18,7 @@ import { openSourcingDb } from "../lib/db.js";
 import { exportToFeishu } from "../lib/feishu.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
-import { extractJdSearchKeyword, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches } from "../lib/ai-controller.js";
+import { extractJdSearchKeyword, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -40,7 +41,75 @@ describe("ecommerce sourcing core", () => {
     expect(keywords[0]).toBe("Newink 还原型辅酶q10 软胶囊");
     expect(keywords).toContain("纽维可 还原型辅酶q10 软胶囊");
     expect(keywords).toContain("Newink 纽维可 还原型辅酶q10");
-    expect(keywords).toContain("辅酶q10 软胶囊");
+    expect(keywords).toContain("Newink 辅酶q10 软胶囊");
+  });
+
+  it("keeps brand terms in the first Taobao keyword attempts", () => {
+    const keywords = buildTaobaoSearchKeywords({
+      brand: "MegaGold",
+      title: "MEGAGOLD美国原装进口MegaGold水溶性辅酶Q10软胶囊60粒"
+    });
+
+    expect(keywords.slice(0, 2).every((keyword) => /megagold/i.test(keyword))).toBe(true);
+    expect(keywords.join(" ")).not.toContain("美国原装进口 辅酶Q10");
+  });
+
+  it("does not treat product category phrases as Chinese brand aliases", () => {
+    const keywords = buildTaobaoSearchKeywords({
+      brand: "VEDONON",
+      title: "VEDONON维多能95%高纯度3倍浓缩深海鱼油软胶囊omega3含DHAEPA护眼"
+    });
+
+    expect(keywords.slice(0, 2).every((keyword) => /vedonon/i.test(keyword))).toBe(true);
+    expect(keywords.join(" ")).not.toContain("浓缩深海鱼油 鱼油");
+  });
+
+  it("does not add unbranded category fallbacks when a JD brand is known", () => {
+    const keywords = buildTaobaoSearchKeywords({
+      brand: "NYO3",
+      title: "NYO3挪威进口97%高纯度含量rTG型深海鱼油呵护心脑血管成人身体养护 120粒*1瓶"
+    });
+
+    expect(keywords.every((keyword) => /nyo3/i.test(keyword))).toBe(true);
+    expect(keywords).not.toContain("鱼油");
+  });
+
+  it("keeps multi-word brands compact in Taobao keywords", () => {
+    const keywords = buildTaobaoSearchKeywords({
+      brand: "VITA GROW",
+      title: "VITA GROW葡聚糖唯他瑞酵母β葡聚糖果汁浓缩液儿童口服 葡聚糖果汁浓缩液1 14支*1盒"
+    });
+
+    expect(keywords[0]).toBe("VITA GROW 葡聚糖");
+    expect(keywords.join(" ")).not.toContain("GROW GROW");
+  });
+
+  it("does not use dosage form alone as the Taobao core product", () => {
+    const keywords = buildTaobaoSearchKeywords({
+      brand: "USANA",
+      title: "优莎娜美国USANA超活代谢+ 燃烧脂肪片 能量提升新陈代谢体重管理 美国版* 84片*1瓶"
+    });
+
+    expect(keywords[0]).toContain("USANA 超活代谢");
+    expect(keywords[0]).not.toBe("USANA 片");
+  });
+
+  it("prefers matched JD brand over generic detail brand for Taobao searches", () => {
+    expect(resolveBrandForTaobao({
+      matchedBrand: "VEDONON",
+      brand: "浓缩深海鱼油",
+      title: "VEDONON维多能95%高纯度3倍浓缩深海鱼油软胶囊omega3"
+    }, "MegaGold")).toBe("VEDONON");
+
+    expect(resolveBrandForTaobao({
+      brand: "浓缩深海鱼油",
+      title: "VEDONON维多能95%高纯度3倍浓缩深海鱼油软胶囊omega3"
+    }, "MegaGold")).toBe("VEDONON");
+
+    expect(resolveBrandForTaobao({
+      brand: "和丽康（Herbs of Gold）",
+      title: "和丽康（Herbs of Gold）白藜芦醇胶囊葡萄籽精华维生素C"
+    }, "NewRhythm")).toBe("Herbs of Gold");
   });
 
   it("extracts alpha lipoic acid as a compact Taobao keyword", () => {
@@ -102,6 +171,37 @@ describe("ecommerce sourcing core", () => {
     expect(matched.matched).toBe(true);
     expect(rejected.matched).toBe(false);
     expect(rejected.reason).toContain("品类不一致");
+  });
+
+  it("rejects same-family Taobao candidates when the product brand differs", () => {
+    const rejected = assessSameProductMatch(
+      {
+        brand: "MegaGold",
+        title: "MEGAGOLD美国原装进口MegaGold水溶性辅酶Q10软胶囊60粒",
+        skuInfo: "60粒*1瓶"
+      },
+      {
+        title: "【美国原装】普丽普莱辅酶q10软胶囊200mg240粒辅酶素美国进口",
+        skuInfo: "240粒"
+      },
+      "美国原装进口 辅酶Q10 软胶囊"
+    );
+    const matched = assessSameProductMatch(
+      {
+        brand: "MegaGold",
+        title: "MEGAGOLD美国原装进口MegaGold水溶性辅酶Q10软胶囊60粒",
+        skuInfo: "60粒*1瓶"
+      },
+      {
+        title: "美国原装进口MegaGold水溶性辅酶Q10软胶囊60粒成人心脏健康保养",
+        skuInfo: "60粒"
+      },
+      "MegaGold 辅酶Q10 软胶囊"
+    );
+
+    expect(rejected.matched).toBe(false);
+    expect(rejected.reason).toContain("品牌");
+    expect(matched.matched).toBe(true);
   });
 
   it("allows same product matching across different bottle counts for unit-price comparison", () => {
@@ -174,6 +274,48 @@ describe("ecommerce sourcing core", () => {
     expect(jdProductMatchesAllowedBrands({
       title: "California Naturals益生菌胶囊60粒"
     }, allowedBrands, "TAHITIAN NONI")).toBe(false);
+  });
+
+  it("ignores generic allowed brand names such as OTHER", () => {
+    expect(jdProductMatchesAllowedBrands({
+      title: "OTHER/其他西藏那曲新鲜冬虫夏草大根头期高海拔鲜活草"
+    }, ["OTHER", "MegaGold"], "SAVASIA")).toBe(false);
+
+    expect(jdProductMatchesAllowedBrands({
+      title: "MOTHERNEST澳洲蜂胶软胶囊365粒"
+    }, ["MOTHERNEST", "MegaGold"], "SAVASIA")).toBe(true);
+  });
+
+  it("stops harvesting a low-quality JD shop before excessive detail clicks", () => {
+    expect(shouldStopJdShopHarvest({
+      detailCheckedInShop: 7,
+      consecutiveCommentRejects: 7
+    }, {
+      maxDetailPerShop: 12,
+      maxConsecutiveCommentRejectsPerShop: 8
+    })).toMatchObject({ stop: false });
+
+    expect(shouldStopJdShopHarvest({
+      detailCheckedInShop: 8,
+      consecutiveCommentRejects: 8
+    }, {
+      maxDetailPerShop: 12,
+      maxConsecutiveCommentRejectsPerShop: 8
+    })).toMatchObject({
+      stop: true,
+      code: "consecutive_comment_rejects"
+    });
+
+    expect(shouldStopJdShopHarvest({
+      detailCheckedInShop: 12,
+      consecutiveCommentRejects: 1
+    }, {
+      maxDetailPerShop: 12,
+      maxConsecutiveCommentRejectsPerShop: 8
+    })).toMatchObject({
+      stop: true,
+      code: "max_detail_per_shop"
+    });
   });
 
   it("reads banned brands from strategy rules instead of hardcoded workflow checks", () => {

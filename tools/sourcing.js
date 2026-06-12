@@ -10,7 +10,7 @@
 import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
 import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus } from "../lib/accounts.js";
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
-import { buildTaobaoSearchKeywords, extractBrand } from "../lib/logic.js";
+import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
 import { calculateUnitPrice } from "../lib/unit-price.js";
 
 import { openSourcingDb } from "../lib/db.js";
@@ -141,6 +141,16 @@ export const parameters = {
       type: "number",
       default: 12,
       description: "jd_harvest用：每个品牌最多尝试多少个买手店，避免冷门品牌长时间空转"
+    },
+    maxDetailPerShop: {
+      type: "number",
+      default: 12,
+      description: "jd_harvest用：每个买手店最多进入多少个商品详情，避免低质量店铺消耗账号操作次数"
+    },
+    maxConsecutiveCommentRejectsPerShop: {
+      type: "number",
+      default: 8,
+      description: "jd_harvest用：同一买手店连续多少个详情评论不达标后跳过该店"
     },
     minSales: {
       type: "number",
@@ -280,7 +290,7 @@ function saveJdCandidate(db, candidate, strategy) {
     shopType: candidate.shopType || "buyer",
     comments: String(candidate.commentsNum || candidate.comments || ""),
     skuInfo: candidate.skuInfo || "",
-    brand: candidate.brand || extractBrand(candidate.title),
+    brand: resolveBrandForTaobao(candidate) || candidate.brand || extractBrand(candidate.title),
     url: candidate.url,
     screenshotPath: candidate.screenshotPath || ""
   }, [], null, { id: strategy.id });
@@ -306,11 +316,16 @@ function normalizeAllowedBrands(allowedBrands, strategy) {
     if (!brand) continue;
     if (keywordBannedByStrategy(brand, strategy)) continue;
     const key = brand.toLowerCase().replace(/\s+/g, "");
-    if (key.length < 2 || seen.has(key)) continue;
+    if (key.length < 2 || seen.has(key) || isGenericAllowedBrand(brand)) continue;
     seen.add(key);
     result.push(brand);
   }
   return result;
+}
+
+function isGenericAllowedBrand(brand) {
+  const key = String(brand || "").toLowerCase().replace(/[\s/_-]+/g, "");
+  return /^(?:other|others|unknown|misc|nobrand|generic|其他|其它|无品牌)$/.test(key);
 }
 
 function getStrategyById(db, strategyId) {
@@ -379,7 +394,7 @@ export async function handler(ctx, db, input) {
           workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → Agent同款匹配+核算利润 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
-              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12)" },
+              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },
               { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
             ],
             data: [
@@ -428,7 +443,7 @@ export async function handler(ctx, db, input) {
         action,
         guide: {
           purpose: "批量跑选品长任务，适合“最终找满100个不重复可用品”。脚本调用同一个 MCP 工具入口，仍然使用本机正式 Chrome 和账号池。",
-          command: "npm run batch:sourcing -- --target=100 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --maxShopsPerBrand=8 --exportFeishu=true",
+          command: "npm run batch:sourcing -- --target=100 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --maxShopsPerBrand=8 --maxDetailPerShop=12 --maxConsecutiveCommentRejectsPerShop=8 --exportFeishu=true",
           brandQueueFormat: [
             "JSON 数组: [\"GNC\", \"Nature Made\"]",
             "或对象: { \"brands\": [\"GNC\", \"Nature Made\"] }"
@@ -440,6 +455,7 @@ export async function handler(ctx, db, input) {
           ],
           safeRun: [
             "遇到验证码、安全验证、访问频繁、登录失效会停止，由 Agent 通知用户处理。",
+            "每个买手店默认最多进 12 个详情，连续 8 个评论不达标会跳过该店，避免低质量店铺消耗账号操作次数。",
             "浏览器会话默认保持打开，不主动清空 profile。",
             "排查问题先调用 logs；jd_harvest 会记录店铺命中/跳过摘要，taobao_harvest 会记录基础规则筛选和淘汰原因摘要。"
           ]
@@ -706,7 +722,7 @@ export async function handler(ctx, db, input) {
     if (action === "jd_search") {
       if (!input.keyword) return { ok: false, message: "缺少关键词" };
       const session = await openAiSessionWithAccount(ctx, db, "jd");
-      const result = await aiJdSearch(session.page, input.keyword);
+      const result = await aiJdSearch(session.page, input.keyword, { platform: "jd", account: session.account });
       return {
         ok: true,
         action,
@@ -748,7 +764,7 @@ export async function handler(ctx, db, input) {
       const bannedKeyword = keywordBannedByStrategy(input.keyword, strategy);
       if (bannedKeyword) return { ...bannedKeyword, action };
       const session = await openAiSessionWithAccount(ctx, db, "jd");
-      await aiJdSearch(session.page, input.keyword);
+      await aiJdSearch(session.page, input.keyword, { platform: "jd", account: session.account });
       const products = await aiExtractJdProducts(session.page, input.maxCount || 30);
       const evaluated = products.map(p => {
         const result = evaluateJdProductByStrategy(p, strategy);
@@ -786,9 +802,12 @@ export async function handler(ctx, db, input) {
       let savedCount = 0;
       try {
         result = await aiJdHarvest(session.page, brand, {
+          account: session.account,
           targetCount: input.targetCount || 10,
           maxPagesPerShop: input.maxPagesPerShop || 3,
           maxShopsPerBrand: input.maxShopsPerBrand || 12,
+          maxDetailPerShop: input.maxDetailPerShop || 12,
+          maxConsecutiveCommentRejectsPerShop: input.maxConsecutiveCommentRejectsPerShop || 8,
           minComments: input.minComments ?? st.jd.minComments,
           priceRange: st.jd.priceRange,
           searchSuffix: st.jd.searchSuffix,
@@ -841,7 +860,7 @@ export async function handler(ctx, db, input) {
       const jdRejectSummary = summarizeRejectReasons(rejected);
       if (jdRejectSummary) safeAddLog(db, "info", `jd_harvest 淘汰原因汇总：${jdRejectSummary}`);
       const suggestedTaobaoTasks = candidates.map((candidate) => {
-        const brandName = candidate.brand || candidate.matchedBrand || extractBrand(candidate.title);
+        const brandName = resolveBrandForTaobao(candidate);
         return {
           jdProductId: candidate.productId,
           jdTitle: candidate.title,
@@ -983,6 +1002,26 @@ export async function handler(ctx, db, input) {
 
   } catch (error) {
     safeAddLog(db, "error", `${action || "unknown"} 失败：${error.message || String(error)}`);
+    if (error.code === "RISK_CONTROL") {
+      const event = `风控暂停：${error.message || "检测到风控"}${error.signal ? `（${error.signal}）` : ""}`;
+      if (error.accountId) {
+        try {
+          setAccountStatus(db, error.accountId, "paused", event);
+          safeAddLog(db, "warn", `账号已暂停：${error.accountName || error.accountId} ${event}`);
+        } catch (e) {
+          safeAddLog(db, "error", `账号暂停失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      return {
+        ok: false,
+        action,
+        risk: true,
+        accountId: error.accountId,
+        accountName: error.accountName,
+        screenshotPath: error.screenshotPath,
+        message: event
+      };
+    }
     if (error.code === "NOT_LOGGED_IN") {
       return {
         ok: false,
@@ -1018,6 +1057,7 @@ function clampLimit(value, fallback) {
 function summarizeJdHarvestStats(stats) {
   const shopStats = Array.isArray(stats?.shopStats) ? stats.shopStats : [];
   if (!shopStats.length) return "";
+  const shopStops = Array.isArray(stats?.shopStops) ? stats.shopStops : [];
   const total = shopStats.reduce((sum, item) => sum + Number(item.total || 0), 0);
   const matched = shopStats.reduce((sum, item) => sum + Number(item.matched || 0), 0);
   const skipped = sumSkipped(shopStats);
@@ -1035,7 +1075,10 @@ function summarizeJdHarvestStats(stats) {
     .slice(0, 5)
     .map(([shop, item]) => `${shop}: ${item.pages}页/${item.total}原始/${item.matched}命中/跳过${formatSkipObject(item.skipped)}`)
     .join("；");
-  return `收集店铺${stats?.shopsCollected ?? "-"}个，尝试${stats?.shopsTried ?? byShop.size}个；列表原始${total}个，命中${matched}个，跳过${formatSkipObject(skipped)}；明细 ${shopBrief}`;
+  const stopBrief = shopStops.length
+    ? `；提前跳过 ${shopStops.slice(0, 5).map((item) => `${item.shopName}: ${item.reason}`).join("；")}`
+    : "";
+  return `收集店铺${stats?.shopsCollected ?? "-"}个，尝试${stats?.shopsTried ?? byShop.size}个；列表原始${total}个，命中${matched}个，跳过${formatSkipObject(skipped)}；明细 ${shopBrief}${stopBrief}`;
 }
 
 function summarizeTaobaoHarvestStats(stats) {

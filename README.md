@@ -17,7 +17,7 @@ ecommerce_sourcing({
 推荐工作流：
 1. `jd_harvest`：先用“品牌 + 买手店”收集买手店名，再只搜买手店名。批量脚本会传入品牌表作为 `allowedBrands`，买手店页里命中任一可用品牌的商品都可进入详情页复核评论数、SKU、主图和价格，并先入库。
 2. 调用方 Agent：从京东候选标题里提取品牌名 + 核心品名，去掉规格、瓶数、营销词。
-3. `taobao_harvest`：用 Agent 清洗后的关键词逐品去淘宝找供货，筛国内发货、48 小时内发货、销量门槛。
+3. `taobao_harvest`：用 Agent 清洗后的关键词逐品去淘宝找供货，筛国内发货、48 小时内发货、销量门槛。前几次搜索必须保留品牌词，不能直接用“美国原装进口 + 品类”这类泛词。
 4. 调用方 Agent：做同款复核、SKU 单位价比价、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。
 5. `save_sourcing`：把京东品和匹配的淘宝货源写回本地库。
 6. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
@@ -190,6 +190,8 @@ npm run batch:sourcing -- \
   --target=100 \
   --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json \
   --maxShopsPerBrand=8 \
+  --maxDetailPerShop=12 \
+  --maxConsecutiveCommentRejectsPerShop=8 \
   --exportFeishu=true
 ```
 
@@ -205,6 +207,8 @@ npm run batch:sourcing -- \
 批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。最终 `export_results` / `export_feishu` 返回的 `count` 小于目标数时，Agent 继续跑下一批品牌即可。
 
 排查批量任务时先看日志：`jd_harvest` 会记录买手店列表命中、跳过原因和详情页淘汰原因；`taobao_harvest` 会记录国内发货、48 小时、销量、价格等基础筛选摘要；批量脚本还会记录同款复核、剂量、单位价和利润策略的淘汰原因。
+
+京东采集默认带低质量店保护：每个买手店最多进 `maxDetailPerShop=12` 个商品详情；如果连续 `maxConsecutiveCommentRejectsPerShop=8` 个详情评论不达标，会跳过当前店铺继续下一个买手店。需要深挖某个店时可以把这两个参数调大。
 
 `save_sourcing` 之后再用 `sourcing_list` 确认淘宝匹配是否已经写回库：
 ```json

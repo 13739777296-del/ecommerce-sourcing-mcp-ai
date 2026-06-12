@@ -18,7 +18,7 @@ import { openSourcingDb } from "../lib/db.js";
 import { exportToFeishu } from "../lib/feishu.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
-import { extractJdSearchKeyword, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
+import { compactSessionTabs, extractJdSearchKeyword, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -240,6 +240,22 @@ describe("ecommerce sourcing core", () => {
     expect(extractJdSearchKeyword(wrongUrl)).toBe("斯维诗swisse");
     expect(jdSearchKeywordMatches(wrongUrl, expected)).toBe(false);
     expect(jdSearchKeywordMatches(correctUrl, expected)).toBe(true);
+  });
+
+  it("compacts controlled Chrome tabs without closing the working page", async () => {
+    const keep = fakePage("work");
+    const oldDetail = fakePage("detail-1");
+    const oldSearch = fakePage("detail-2");
+    const pages = [keep, oldDetail, oldSearch];
+    const context = { pages: () => pages };
+
+    const result = await compactSessionTabs(context as any, keep as any, "unit-test");
+
+    expect(result).toMatchObject({ closed: 2, failed: 0, kept: 1 });
+    expect(keep.closed).toBe(false);
+    expect(keep.front).toBe(true);
+    expect(oldDetail.closed).toBe(true);
+    expect(oldSearch.closed).toBe(true);
   });
 
   it("keeps JD shop harvesting focused on brand without requiring product-name tokens", () => {
@@ -909,6 +925,54 @@ describe("ecommerce sourcing core", () => {
     });
   });
 
+  it("allows low-cost Taobao supply after Agent review because cheap supply is the point", async () => {
+    const dataDir = tempDir();
+    const ctx = testContext(dataDir);
+
+    const saved = await sourcingExecute({
+      action: "save_sourcing",
+      jdProduct: {
+        productId: "jd-low-source-1",
+        title: "MegaGold 辅酶Q10 软胶囊 60粒",
+        price: 96,
+        unitPrice: 1.6,
+        unit: "粒",
+        shop: "京东买手店",
+        shopType: "buyer",
+        skuInfo: "60粒*1瓶"
+      },
+      taobaoMatches: [{
+        taobao: {
+          productId: "tb-low-source-1",
+          title: "MegaGold 辅酶Q10 软胶囊 60粒 国内现货",
+          price: 58,
+          unitPrice: 0.9667,
+          unit: "粒",
+          sales: "20",
+          shop: "淘宝供货店",
+          shipFrom: "广东",
+          isDomestic: true,
+          shipHours: 24,
+          skuInfo: "60粒"
+        },
+        profit: {
+          profitAmount: 38,
+          profitRate: 0.3958
+        },
+        review: {
+          sameProductReason: "品牌、品名、60粒规格一致",
+          skuCalculation: "京东96/60=1.60元/粒；淘宝58/60=0.9667元/粒",
+          profitCalculation: "(96-58)/96=39.58%"
+        }
+      }]
+    }, ctx);
+
+    expect(saved).toMatchObject({
+      ok: true,
+      saved: 1
+    });
+  });
+
   it("persists custom strategies through the all-in-one MCP tool", async () => {
     const dataDir = tempDir();
     const ctx = testContext(dataDir);
@@ -965,6 +1029,23 @@ function jsonResponse(data: unknown) {
     status: 200,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+function fakePage(name: string) {
+  return {
+    name,
+    closed: false,
+    front: false,
+    isClosed() {
+      return this.closed;
+    },
+    async close() {
+      this.closed = true;
+    },
+    async bringToFront() {
+      this.front = true;
+    }
+  };
 }
 
 function testContext(dataDir: string) {

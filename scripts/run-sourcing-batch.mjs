@@ -68,6 +68,7 @@ for (const brand of brandQueue) {
   const jdResult = await execute({
     action: "jd_harvest",
     brand,
+    allowedBrands: brandQueue,
     targetCount: jdTargetPerBrand,
     maxPagesPerShop,
     maxShopsPerBrand
@@ -109,7 +110,7 @@ for (const brand of brandQueue) {
     }
 
     console.log(`[batch] JD候选: ${jd.productId} ${short(jd.title, 42)}`);
-    const brandName = jd.brand || extractBrand(jd.title) || brand;
+    const brandName = jd.brand || jd.matchedBrand || extractBrand(jd.title) || brand;
     const keywords = buildTaobaoSearchKeywords({ brand: brandName, title: jd.title }).slice(0, maxKeywordsPerJd);
     let saved = false;
 

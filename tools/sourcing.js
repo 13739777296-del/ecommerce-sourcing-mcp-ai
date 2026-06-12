@@ -122,6 +122,11 @@ export const parameters = {
       type: "string",
       description: "jd_harvest用：品牌词(如GNC)，内部拼成\"品牌 买手店\"搜索"
     },
+    allowedBrands: {
+      type: "array",
+      items: { type: "string" },
+      description: "jd_harvest用：可用品牌池。搜到买手店后，店铺页中匹配任一可用品牌的商品都可进入详情；不传则只保留当前brand。"
+    },
     targetCount: {
       type: "number",
       default: 10,
@@ -292,6 +297,22 @@ function keywordBannedByStrategy(keyword, strategy) {
   };
 }
 
+function normalizeAllowedBrands(allowedBrands, strategy) {
+  if (!Array.isArray(allowedBrands)) return [];
+  const seen = new Set();
+  const result = [];
+  for (const item of allowedBrands) {
+    const brand = String(item || "").trim();
+    if (!brand) continue;
+    if (keywordBannedByStrategy(brand, strategy)) continue;
+    const key = brand.toLowerCase().replace(/\s+/g, "");
+    if (key.length < 2 || seen.has(key)) continue;
+    seen.add(key);
+    result.push(brand);
+  }
+  return result;
+}
+
 function getStrategyById(db, strategyId) {
   const id = strategyId || "no-source-arbitrage";
   if (DEFAULT_STRATEGIES[id]) return DEFAULT_STRATEGIES[id];
@@ -384,13 +405,13 @@ export async function handler(ctx, db, input) {
             ]
           },
           tips: [
-            "京东第一段搜'品牌+买手店'(如GNC 买手店)找买手店名；第二段只搜买手店名，不拼产品名，避免漏掉该店其它同品牌品。",
+            "京东第一段搜'品牌+买手店'(如GNC 买手店)找买手店名；第二段只搜买手店名，不拼产品名。批量脚本会传入allowedBrands，买手店页里命中任一可用品牌的商品都可进入详情。",
             "禁售品牌在策略库 riskControl.bannedBrands 里配置，命中后不启动采集、不入库。",
-            "jd_harvest会先保存京东候选；返回后，Agent必须从标题提取'品牌+核心品名'（别带规格），再调用taobao_harvest",
+            "jd_harvest会先保存京东候选；返回后，Agent必须从标题提取'品牌+核心品名'（别带规格），再调用taobao_harvest。",
             "taobao_harvest只返回通过基础规则的淘宝候选；如果 selectedSkuRejectReason 不为空，该候选会进入 rejected，Agent不要拿它入库",
             "Agent完成同款复核、单位价和利润计算后，必须调用save_sourcing把匹配结果写回库",
             "导出前建议调用sourcing_list确认 taobaoMatchCount 是否大于0；如果全是0，说明还只存了京东候选，没完成淘宝匹配入库",
-            "Agent负责清洗: 算最小规格单价、同款去重、按策略利润筛选(默认35%-60%且最低20元)",
+            "Agent负责清洗: 算最小规格单价、同款去重、按策略利润筛选(默认35%-60%且最低20元)。",
             "最终CSV/飞书导出会再次按品牌+核心品名+剂量做同款去重，导出count就是最终去重后的商品数；如果没达标，Agent继续跑下一批即可。",
             "筛选逻辑从策略引擎读取(loadStrategyDefaults)，改策略文件即生效",
             "浏览器永不关闭(避免风控)，账号存本机(用户隔离)",
@@ -772,6 +793,7 @@ export async function handler(ctx, db, input) {
           priceRange: st.jd.priceRange,
           searchSuffix: st.jd.searchSuffix,
           collectShopNames: st.jd.collectShopNames,
+          allowedBrands: normalizeAllowedBrands(input.allowedBrands, st.strategy),
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd"),
           onCandidate: async (candidate) => {
             if (!candidate?.productId || savedIds.has(candidate.productId)) return;
@@ -819,7 +841,7 @@ export async function handler(ctx, db, input) {
       const jdRejectSummary = summarizeRejectReasons(rejected);
       if (jdRejectSummary) safeAddLog(db, "info", `jd_harvest 淘汰原因汇总：${jdRejectSummary}`);
       const suggestedTaobaoTasks = candidates.map((candidate) => {
-        const brandName = candidate.brand || extractBrand(candidate.title);
+        const brandName = candidate.brand || candidate.matchedBrand || extractBrand(candidate.title);
         return {
           jdProductId: candidate.productId,
           jdTitle: candidate.title,
@@ -1068,7 +1090,7 @@ function translateSkipKey(key) {
     noProductId: "缺ID",
     duplicate: "重复",
     shopMismatch: "非本店",
-    brandMismatch: "非品牌",
+    brandMismatch: "非可用品牌",
     nonDomestic: "非国内",
     slowShipping: "非48小时",
     lowSales: "销量不足",

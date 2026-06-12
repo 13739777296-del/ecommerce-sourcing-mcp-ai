@@ -17,7 +17,7 @@ import { openSourcingDb } from "../lib/db.js";
 import { exportToFeishu } from "../lib/feishu.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
-import { extractJdSearchKeyword, jdProductMatchesBrandSeed, jdSearchKeywordMatches } from "../lib/ai-controller.js";
+import { extractJdSearchKeyword, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches } from "../lib/ai-controller.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -136,6 +136,26 @@ describe("ecommerce sourcing core", () => {
     expect(jdProductMatchesBrandSeed({
       title: "Life Space益倍适成人益生菌320亿活菌60粒"
     }, "Swisse 辅酶Q10")).toBe(false);
+  });
+
+  it("allows JD shop harvesting to keep any brand from the configured brand pool", () => {
+    const allowedBrands = ["GNC", "Nordic Naturals", "NEO", "维他树（VITATREE）"];
+
+    expect(jdProductMatchesAllowedBrands({
+      title: "Nordic Naturals挪威小鱼美国青少年儿童Ultimate Omega鱼油"
+    }, allowedBrands, "TAHITIAN NONI")).toBe(true);
+
+    expect(jdProductMatchesAllowedBrands({
+      title: "VITATREE维他树辅酶Q10软胶囊60粒"
+    }, allowedBrands, "TAHITIAN NONI")).toBe(true);
+
+    expect(jdProductMatchesAllowedBrands({
+      title: "Neocell胶原蛋白片120粒"
+    }, allowedBrands, "TAHITIAN NONI")).toBe(false);
+
+    expect(jdProductMatchesAllowedBrands({
+      title: "California Naturals益生菌胶囊60粒"
+    }, allowedBrands, "TAHITIAN NONI")).toBe(false);
   });
 
   it("reads banned brands from strategy rules instead of hardcoded workflow checks", () => {

@@ -13,6 +13,7 @@
     "mcp": "node mcp/server.mjs",
     "mcp:http": "node mcp/http-server.mjs",
     "worker": "node mcp/local-worker.mjs",
+    "batch:sourcing": "node scripts/run-sourcing-batch.mjs",
     "smoke": "node scripts/smoke.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

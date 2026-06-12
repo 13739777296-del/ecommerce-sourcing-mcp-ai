@@ -21,7 +21,7 @@ ecommerce_sourcing({
 4. 调用方 Agent：做同款复核、SKU 单位价比价、利润筛选；`selectedSkuRejectReason` 不为空的淘宝候选不要入库。
 5. `save_sourcing`：把京东品和匹配的淘宝货源写回本地库。
 6. `sourcing_list`：导出前确认 `taobaoMatchCount > 0`，避免只导出京东候选。
-7. `export_results` / `export_feishu`：导出 CSV 或飞书表格。
+7. `export_results` / `export_feishu`：导出 CSV 或飞书表格。导出前会按“同款商品”最终去重，返回的 `count` 才是最终可用商品数。
 
 ## 一个 MCP，所有功能
 
@@ -29,6 +29,7 @@ ecommerce_sourcing({
 |--------|------|
 | **初始化** | |
 | `usage_guide` | 查看 Agent 使用手册 |
+| `batch_guide` | 查看批量选品脚本、断点续跑和最终去重规则 |
 | `bootstrap` | 新电脑安装本机 worker 引导 |
 | `warmup` | 只读账号状态预检 |
 | **策略库** | |
@@ -57,9 +58,9 @@ ecommerce_sourcing({
 | `save_sourcing` | 保存京东品和淘宝匹配 |
 | `sourcing_list` | 查看已入库结果和淘宝匹配数量 |
 | `logs` | 查看最近 MCP 操作日志 |
-| `export_results` | 导出 CSV |
+| `export_results` | 导出 CSV；导出前按品牌、核心品名和剂量最终去重 |
 | `bind_feishu` | 绑定飞书 |
-| `export_feishu` | 导出飞书多维表格；主列会初始化为“序号”，并清理默认字段和默认空行 |
+| `export_feishu` | 导出飞书多维表格；主列会初始化为“序号”，并清理默认字段和默认空行；导出前按同款商品最终去重 |
 | `close` | 兼容旧调用；默认保持浏览器会话打开 |
 
 ## 内置策略
@@ -176,6 +177,32 @@ ecommerce_sourcing({ action: "sourcing_list", limit: 20 })
 }
 ```
 
+### 批量跑满目标数量
+
+长任务建议由 Agent 先调用：
+```json
+{ "action": "batch_guide" }
+```
+
+本仓库内置批量编排脚本，适合“找满 100 个最终去重可用品”：
+```bash
+npm run batch:sourcing -- \
+  --target=100 \
+  --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json \
+  --exportFeishu=true
+```
+
+品牌队列支持两种格式：
+```json
+["GNC", "Nature Made"]
+```
+
+```json
+{ "brands": ["GNC", "Nature Made"] }
+```
+
+批量脚本会断点续跑，并使用和 CSV/飞书一致的最终去重规则。最终 `export_results` / `export_feishu` 返回的 `count` 小于目标数时，Agent 继续跑下一批品牌即可。
+
 `save_sourcing` 之后再用 `sourcing_list` 确认淘宝匹配是否已经写回库：
 ```json
 {
@@ -228,6 +255,7 @@ node mcp/local-worker.mjs
 npm run typecheck                 # 类型检查
 npm test                          # 本地单元测试和 MCP 协议测试，不打开京东/淘宝
 npm run smoke                     # 安全烟测：usage_guide + warmup
+npm run batch:sourcing -- --target=1 --brandLimit=1  # 小批量真实链路验证，会打开本机Chrome
 ```
 
 ## License

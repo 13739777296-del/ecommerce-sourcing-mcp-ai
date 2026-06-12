@@ -327,6 +327,82 @@ describe("ecommerce sourcing core", () => {
     }
   });
 
+  it("exports one final row for duplicated JD products and keeps the better match", () => {
+    const dataDir = tempDir();
+    const db = openSourcingDb({ dataDir });
+    const outPath = join(dataDir, "exports", "deduped.csv");
+
+    try {
+      db.saveSourcing({
+        productId: "jd-dup-low",
+        title: "GNC健安喜 辅酶Q10 100mg 60粒 软胶囊",
+        price: 228,
+        unitPrice: 3.8,
+        unit: "粒",
+        comments: "20",
+        shop: "买手店A",
+        shopType: "buyer",
+        brand: "GNC",
+        skuInfo: "60粒/瓶",
+        url: "https://item.jd.com/dup-low.html"
+      }, [{
+        taobao: {
+          productId: "tb-dup-low",
+          title: "GNC 辅酶Q10 100mg 60粒",
+          price: 160,
+          unitPrice: 2.67,
+          unit: "粒",
+          sales: "30",
+          shop: "淘宝A",
+          shipFrom: "广东",
+          isDomestic: true,
+          shipHours: 24,
+          url: "https://item.taobao.com/item.htm?id=dup-low"
+        },
+        profit: { profitAmount: 68, profitRate: 0.2974 }
+      }], null, { id: "no-source-arbitrage" });
+
+      db.saveSourcing({
+        productId: "jd-dup-best",
+        title: "GNC 健安喜 美国辅酶Q10软胶囊100mg 60粒",
+        price: 268,
+        unitPrice: 4.47,
+        unit: "粒",
+        comments: "50",
+        shop: "买手店B",
+        shopType: "buyer",
+        brand: "GNC",
+        skuInfo: "60粒",
+        url: "https://item.jd.com/dup-best.html"
+      }, [{
+        taobao: {
+          productId: "tb-dup-best",
+          title: "GNC 辅酶Q10 100mg 60粒 国内现货",
+          price: 160,
+          unitPrice: 2.67,
+          unit: "粒",
+          sales: "88",
+          shop: "淘宝B",
+          shipFrom: "浙江",
+          isDomestic: true,
+          shipHours: 24,
+          url: "https://item.taobao.com/item.htm?id=dup-best"
+        },
+        profit: { profitAmount: 108, profitRate: 0.4029 }
+      }], null, { id: "no-source-arbitrage" });
+
+      const exported = db.exportSourcing(outPath);
+      const text = readFileSync(outPath, "utf8");
+
+      expect(exported.count).toBe(1);
+      expect(text).toContain("jd-dup-best");
+      expect(text).toContain("id=dup-best");
+      expect(text).not.toContain("jd-dup-low");
+    } finally {
+      db.close();
+    }
+  });
+
   it("initializes Feishu export fields and clears default empty records", async () => {
     const dataDir = tempDir();
     writeFileSync(join(dataDir, "feishu-cred.json"), JSON.stringify({
@@ -396,14 +472,14 @@ describe("ecommerce sourcing core", () => {
     try {
       db.saveSourcing({
         productId: "jd-1",
-        title: "GNC 辅酶Q10 60粒",
+        title: "GNC 辅酶Q10 软胶囊 60粒",
         price: 398,
         unitPrice: 6.63,
         unit: "粒",
         comments: "3",
         shop: "京东买手店",
         shopType: "buyer",
-        brand: "Swisse",
+        brand: "GNC",
         skuInfo: "60粒/瓶",
         url: "https://item.jd.com/1.html"
       }, [{
@@ -421,6 +497,35 @@ describe("ecommerce sourcing core", () => {
           url: "https://item.taobao.com/item.htm?id=1"
         },
         profit: { profitAmount: 182, profitRate: 0.4573 }
+      }], null, { id: "no-source-arbitrage" });
+
+      db.saveSourcing({
+        productId: "jd-1-better",
+        title: "GNC健安喜 辅酶Q10软胶囊 60粒",
+        price: 420,
+        unitPrice: 7,
+        unit: "粒",
+        comments: "9",
+        shop: "京东买手店二",
+        shopType: "buyer",
+        brand: "GNC",
+        skuInfo: "60粒",
+        url: "https://item.jd.com/1-better.html"
+      }, [{
+        taobao: {
+          productId: "tb-1-better",
+          title: "GNC 辅酶Q10 60粒 国内现货",
+          price: 210,
+          unitPrice: 3.5,
+          unit: "粒",
+          sales: "80",
+          shop: "淘宝供货店二",
+          shipFrom: "浙江",
+          isDomestic: true,
+          shipHours: 24,
+          url: "https://item.taobao.com/item.htm?id=1-better"
+        },
+        profit: { profitAmount: 210, profitRate: 0.5 }
       }], null, { id: "no-source-arbitrage" });
 
       const exported = await exportToFeishu(db, dataDir);
@@ -455,10 +560,10 @@ describe("ecommerce sourcing core", () => {
       expect(defaultRecords).toHaveLength(0);
       expect(createdRecords[0]).toMatchObject({
         "序号": 1,
-        "京东店铺": "京东买手店",
-        "京东标题": "GNC 辅酶Q10 60粒",
-        "淘宝店铺": "淘宝供货店",
-        "利润率": "45.7%"
+        "京东店铺": "京东买手店二",
+        "京东标题": "GNC健安喜 辅酶Q10软胶囊 60粒",
+        "淘宝店铺": "淘宝供货店二",
+        "利润率": "50.0%"
       });
       const deleteRequest = requests.find((request) => request.url.endsWith("/records/batch_delete"));
       expect((deleteRequest?.body as { records?: string[] } | undefined)?.records).toHaveLength(2);
@@ -510,6 +615,7 @@ describe("ecommerce sourcing core", () => {
       jdTitle: "GNC 辅酶Q10 60粒",
       taobaoMatchCount: 1
     });
+    expect(listed.dedupedQualifiedCount).toBe(1);
     expect(logs.logs.some((log: { message: string }) => log.message.includes("save_sourcing 已入库"))).toBe(true);
   });
 
@@ -566,6 +672,16 @@ describe("ecommerce sourcing core", () => {
     expect(result.installCommand).toContain("curl -fsSL");
     expect(result.installScriptUrl).toContain("/install.sh");
     expect(result.guide).toBeNull();
+  });
+
+  it("returns batch sourcing guidance for calling Agents", async () => {
+    const dataDir = tempDir();
+    const result = await sourcingExecute({ action: "batch_guide" }, testContext(dataDir));
+    const guide = result.guide as { command: string; dedupe: string[] };
+
+    expect(result.ok).toBe(true);
+    expect(guide.command).toContain("npm run batch:sourcing");
+    expect(guide.dedupe.join(" ")).toContain("最终去重");
   });
 });
 

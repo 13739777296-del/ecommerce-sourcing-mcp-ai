@@ -40,7 +40,7 @@ export const parameters = {
     action: {
       type: "string",
       enum: [
-        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "bootstrap",
+        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
@@ -54,6 +54,7 @@ export const parameters = {
         京东选品(推荐): jd_harvest —— 搜"品牌+买手店"收集买手店名→只搜店名→进详情拿评价→筛评价>=策略门槛
         淘宝单步: taobao_search/search_image/extract
         数据: save_sourcing/sourcing_list/logs/export_results/export_feishu
+        批量: batch_guide 查看批量选品脚本和断点续跑方式
         关闭: close`
     },
     keyword: {
@@ -359,8 +360,9 @@ export async function handler(ctx, db, input) {
               { name: "save_sourcing", desc: "Agent匹配后存库：京东品+淘宝匹配列表→入库，供导出用", params: "jdProduct, taobaoMatches, strategyId" },
               { name: "sourcing_list", desc: "查看当前已入库的京东候选和淘宝匹配数量，适合断点续跑或导出前确认", params: "limit" },
               { name: "logs", desc: "查看最近 MCP 操作日志，排查哪一步失败或是否已经入库", params: "limit" },
-              { name: "export_results", desc: "导出CSV到本地，表格含京东+淘宝+利润+链接" },
-              { name: "export_feishu", desc: "导出飞书多维表格，截图嵌单元格在线看。需先bind_feishu绑定" },
+              { name: "export_results", desc: "导出CSV到本地，表格含京东+淘宝+利润+链接；导出前会按同款商品最终去重" },
+              { name: "export_feishu", desc: "导出飞书多维表格，截图嵌单元格在线看；导出前会按同款商品最终去重。需先bind_feishu绑定" },
+              { name: "batch_guide", desc: "返回批量选品脚本用法，适合目标100个可用品这种长任务" },
             ],
             feishu: [
               { name: "bind_feishu", desc: "扫码绑定飞书（一次就行，零配置）" },
@@ -384,12 +386,38 @@ export async function handler(ctx, db, input) {
             "Agent完成同款复核、单位价和利润计算后，必须调用save_sourcing把匹配结果写回库",
             "导出前建议调用sourcing_list确认 taobaoMatchCount 是否大于0；如果全是0，说明还只存了京东候选，没完成淘宝匹配入库",
             "Agent负责清洗: 算最小规格单价、同款去重、按策略利润筛选(默认35%-60%且最低20元)",
+            "最终CSV/飞书导出会再次按品牌+核心品名+剂量做同款去重，导出count就是最终去重后的商品数；如果没达标，Agent继续跑下一批即可。",
             "筛选逻辑从策略引擎读取(loadStrategyDefaults)，改策略文件即生效",
             "浏览器永不关闭(避免风控)，账号存本机(用户隔离)",
             "CSV表格嵌不了图，飞书表格可以嵌图在线看"
           ]
         },
         message: "使用指南已返回，请按 guide.actions 查看可用操作"
+      };
+    }
+
+    if (action === "batch_guide") {
+      return {
+        ok: true,
+        action,
+        guide: {
+          purpose: "批量跑选品长任务，适合“最终找满100个不重复可用品”。脚本调用同一个 MCP 工具入口，仍然使用本机正式 Chrome 和账号池。",
+          command: "npm run batch:sourcing -- --target=100 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --exportFeishu=true",
+          brandQueueFormat: [
+            "JSON 数组: [\"GNC\", \"Nature Made\"]",
+            "或对象: { \"brands\": [\"GNC\", \"Nature Made\"] }"
+          ],
+          dedupe: [
+            "最终计数不是简单京东ID计数，而是按品牌+核心品名+剂量生成商品指纹。",
+            "CSV 和飞书导出也使用同一套最终去重逻辑。",
+            "如果 export_results/export_feishu 返回的 count 小于目标数，Agent 应继续执行下一批品牌。"
+          ],
+          safeRun: [
+            "遇到验证码、安全验证、访问频繁、登录失效会停止，由 Agent 通知用户处理。",
+            "浏览器会话默认保持打开，不主动清空 profile。"
+          ]
+        },
+        message: "已返回批量选品脚本用法和最终去重规则"
       };
     }
 
@@ -564,13 +592,16 @@ export async function handler(ctx, db, input) {
 
     if (action === "sourcing_list") {
       const limit = clampLimit(input.limit, 50);
+      const st = loadStrategyDefaults(db, input.strategyId);
       const items = db.listSourcingResults(limit);
+      const dedupedQualifiedItems = db.listDedupedQualifiedResults(st.profit);
       return {
         ok: true,
         action,
         count: items.length,
+        dedupedQualifiedCount: dedupedQualifiedItems.length,
         items,
-        message: `已返回最近 ${items.length} 条入库选品结果`
+        message: `已返回最近 ${items.length} 条入库选品结果；最终去重达标 ${dedupedQualifiedItems.length} 个`
       };
     }
 

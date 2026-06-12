@@ -27,6 +27,7 @@ const maxKeywordsPerJd = numberArg(args.maxKeywordsPerJd, 2);
 const strategy = DEFAULT_STRATEGIES["no-source-arbitrage"];
 const ctx = { dataDir, config: { get: () => "" }, log: console };
 const sleepMs = numberArg(args.sleepMs, 1500);
+const minSameProductConfidence = numberArg(args.minSameProductConfidence, 0.35);
 
 mkdirSync(dataDir, { recursive: true });
 
@@ -249,7 +250,7 @@ function buildQualifiedMatches(jd, taobaoCandidates, keyword) {
     seenTaobao.add(tb.productId);
 
     const same = assessSameProductMatch(jd, tb, keyword);
-    if (!same.matched || same.confidence < 0.5) {
+    if (!same.matched || same.confidence < minSameProductConfidence) {
       rejections.push(reviewReject(tb, "同款不匹配", `${same.reason || "标题/SKU不匹配"}，置信度${Number(same.confidence || 0).toFixed(2)}`));
       continue;
     }

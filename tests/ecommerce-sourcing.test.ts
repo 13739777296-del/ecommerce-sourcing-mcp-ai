@@ -118,6 +118,7 @@ describe("ecommerce sourcing core", () => {
     );
 
     expect(match.matched).toBe(true);
+    expect(match.confidence).toBeGreaterThanOrEqual(0.35);
     expect(match.reason).toContain("按单位价继续复核");
   });
 

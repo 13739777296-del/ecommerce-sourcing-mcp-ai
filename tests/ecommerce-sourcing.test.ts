@@ -104,6 +104,23 @@ describe("ecommerce sourcing core", () => {
     expect(rejected.reason).toContain("品类不一致");
   });
 
+  it("allows same product matching across different bottle counts for unit-price comparison", () => {
+    const match = assessSameProductMatch(
+      {
+        title: "UQB美国原装进口洱宝矿维胶囊神经性耳鸣嗡嗡响改善耳健康耳背 60粒*5瓶",
+        skuInfo: "60粒*5瓶"
+      },
+      {
+        title: "UQB美国进口洱宝胶囊耳鸣耳响听力清耳通窍营养耳神下降胶囊60粒",
+        skuInfo: "60粒"
+      },
+      "UQB 胶囊"
+    );
+
+    expect(match.matched).toBe(true);
+    expect(match.reason).toContain("按单位价继续复核");
+  });
+
   it("rejects Taobao candidates when the selected SKU is a different product family", () => {
     const rejected = taobaoSelectedSkuRejectReason("Swisse NAD+ PQQ", ["固醇胶囊1瓶"]);
     const allowedWhenSkuIsGeneric = taobaoSelectedSkuRejectReason("Swisse NAD+ PQQ", ["【1瓶】新生瓶ultra 30粒"]);

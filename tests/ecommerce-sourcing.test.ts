@@ -16,6 +16,7 @@ import {
 } from "../lib/logic.js";
 import { openSourcingDb } from "../lib/db.js";
 import { exportToFeishu } from "../lib/feishu.js";
+import { detectRiskControl } from "../lib/risk-guard.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
 import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
@@ -97,6 +98,18 @@ describe("ecommerce sourcing core", () => {
 
     expect(filtered.matches).toHaveLength(1);
     expect(filtered.skipped.slowShipping).toBe(0);
+  });
+
+  it("detects JD privatedomain risk handler urls", async () => {
+    const result = await detectRiskControl({
+      url: () => "https://cfe.m.jd.com/privatedomain/risk_handler/03101900/?returnurl=https%3A%2F%2Fsearch.jd.com%2FSearch",
+      locator: () => ({
+        innerText: async () => ""
+      })
+    });
+
+    expect(result.blocked).toBe(true);
+    expect(result.signal).toContain("risk");
   });
 
   it("keeps multi-word brands compact in Taobao keywords", () => {

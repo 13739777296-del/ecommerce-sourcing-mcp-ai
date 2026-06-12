@@ -20,6 +20,7 @@ const target = numberArg(args.target, 100);
 const brandLimit = numberArg(args.brandLimit, 0);
 const jdTargetPerBrand = numberArg(args.jdTargetPerBrand, 3);
 const maxPagesPerShop = numberArg(args.maxPagesPerShop, 1);
+const maxShopsPerBrand = numberArg(args.maxShopsPerBrand, 8);
 const taobaoMaxCount = numberArg(args.taobaoMaxCount, 30);
 const taobaoMaxDetail = numberArg(args.taobaoMaxDetail, 8);
 const maxKeywordsPerJd = numberArg(args.maxKeywordsPerJd, 2);
@@ -39,7 +40,7 @@ process.on("SIGINT", () => {
 });
 
 console.log(`[batch] dataDir=${dataDir}`);
-console.log(`[batch] brands=${brandQueue.length}, target=${target}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}`);
+console.log(`[batch] brands=${brandQueue.length}, target=${target}, jdTargetPerBrand=${jdTargetPerBrand}, maxPagesPerShop=${maxPagesPerShop}, maxShopsPerBrand=${maxShopsPerBrand}`);
 
 const initialCount = qualifiedCount();
 console.log(`[batch] 当前已达标可用品: ${initialCount}`);
@@ -68,7 +69,8 @@ for (const brand of brandQueue) {
     action: "jd_harvest",
     brand,
     targetCount: jdTargetPerBrand,
-    maxPagesPerShop
+    maxPagesPerShop,
+    maxShopsPerBrand
   }, ctx);
 
   state.runs.push({

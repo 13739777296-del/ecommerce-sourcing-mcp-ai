@@ -688,6 +688,7 @@ describe("ecommerce sourcing core", () => {
 
     expect(result.ok).toBe(true);
     expect(guide.command).toContain("npm run batch:sourcing");
+    expect(guide.command).toContain("--maxShopsPerBrand=8");
     expect(guide.dedupe.join(" ")).toContain("最终去重");
   });
 });

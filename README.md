@@ -189,6 +189,7 @@ ecommerce_sourcing({ action: "sourcing_list", limit: 20 })
 npm run batch:sourcing -- \
   --target=100 \
   --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json \
+  --maxShopsPerBrand=8 \
   --exportFeishu=true
 ```
 

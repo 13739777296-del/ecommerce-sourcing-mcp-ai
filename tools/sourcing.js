@@ -132,6 +132,11 @@ export const parameters = {
       default: 3,
       description: "jd_harvest用：每个买手店最多翻几页(每页约60品)"
     },
+    maxShopsPerBrand: {
+      type: "number",
+      default: 12,
+      description: "jd_harvest用：每个品牌最多尝试多少个买手店，避免冷门品牌长时间空转"
+    },
     minSales: {
       type: "number",
       default: 10,
@@ -353,7 +358,7 @@ export async function handler(ctx, db, input) {
           workflow: "jd_harvest(京东候选先入库) → Agent从标题提取品牌+核心品名 → taobao_harvest(以此为keyword) → Agent同款匹配+核算利润 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
-              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3)" },
+              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12)" },
               { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛国内+48h+已售→进详情→SKU+截图", params: "keyword, minSales(默认10), requireDomestic, require48h" },
             ],
             data: [
@@ -402,7 +407,7 @@ export async function handler(ctx, db, input) {
         action,
         guide: {
           purpose: "批量跑选品长任务，适合“最终找满100个不重复可用品”。脚本调用同一个 MCP 工具入口，仍然使用本机正式 Chrome 和账号池。",
-          command: "npm run batch:sourcing -- --target=100 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --exportFeishu=true",
+          command: "npm run batch:sourcing -- --target=100 --brands=$HOME/.ecommerce-sourcing-agent/brand-queue.json --maxShopsPerBrand=8 --exportFeishu=true",
           brandQueueFormat: [
             "JSON 数组: [\"GNC\", \"Nature Made\"]",
             "或对象: { \"brands\": [\"GNC\", \"Nature Made\"] }"
@@ -761,6 +766,7 @@ export async function handler(ctx, db, input) {
         result = await aiJdHarvest(session.page, brand, {
           targetCount: input.targetCount || 10,
           maxPagesPerShop: input.maxPagesPerShop || 3,
+          maxShopsPerBrand: input.maxShopsPerBrand || 12,
           minComments: input.minComments ?? st.jd.minComments,
           priceRange: st.jd.priceRange,
           searchSuffix: st.jd.searchSuffix,

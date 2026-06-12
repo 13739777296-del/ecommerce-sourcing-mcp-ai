@@ -43,6 +43,13 @@ describe("ecommerce sourcing core", () => {
     expect(keywords).toContain("辅酶q10 软胶囊");
   });
 
+  it("extracts alpha lipoic acid as a compact Taobao keyword", () => {
+    const title = "GNC健安喜美国阿尔法α-硫辛酸胰岛糖尿病人无糖食品护肝300/ 600mg 健安喜GNC硫辛酸600mg 60粒*2瓶";
+
+    expect(buildTaobaoSearchKeyword({ brand: "GNC", title })).toBe("GNC 硫辛酸");
+    expect(buildTaobaoSearchKeywords({ brand: "GNC", title })[0]).toBe("GNC 硫辛酸");
+  });
+
   it("rejects irrelevant Taobao candidates before profit comparison", () => {
     expect(coreProductMatched("纽维可还原型辅酶Q10软胶囊60粒", "Newink 还原型辅酶q10 软胶囊")).toBe(true);
     expect(coreProductMatched("CPE路由器工厂设备测试使用反向nano sim卡", "Newink 还原型辅酶q10 软胶囊")).toBe(false);

@@ -207,6 +207,7 @@ if (finalCount >= target || args.exportFeishu === "true") {
   const feishu = await execute({ action: "export_feishu" }, ctx);
   console.log(`[batch] 飞书: ${JSON.stringify({ ok: feishu.ok, count: feishu.count, url: feishu.url, message: feishu.message }, null, 2)}`);
 }
+process.exit(stopping ? 130 : 0);
 
 function buildQualifiedMatches(jd, taobaoCandidates, keyword) {
   const matches = [];

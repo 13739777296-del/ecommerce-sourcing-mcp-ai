@@ -521,6 +521,12 @@ export async function handler(ctx, db, input) {
           description: "一套通用AI驱动选品引擎。京东找买手店候选 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
           onboarding: "新用户/新电脑第一步：调用 setup_guide（只读零风控），它会用大白话告诉你当前缺什么、下一步该做什么（装Chrome？加账号？扫码登录？）。照着返回的 nextStep 一步步走，直到 ready=true 再开始选品。",
           workflow: "jd_harvest(京东候选先入库，列表已按评论数倒序，评价达标才进) → Agent审核清洗候选(确认是买手店/评价≥门槛/价格在区间) → Agent从京东标题提取品牌+核心品名(去掉规格/装量/营销词) → taobao_harvest(keyword=品牌+核心品名，并把 brand 单独传入做标题品牌过滤) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
+          batchSizing: {
+            model: "迭代轮次：一轮 jd_harvest 拉一批京东候选 → 把这批全部过 taobao_harvest 比价 → 看达标数 → 没攒够目标就再来一轮。别一次把 targetCount 定几百，会一次烧光账号。",
+            jdPerRound: "京东一轮 targetCount 建议 40-60：一个京东号撞风控前大概只能安全拉 20-40 个，靠 in-call 自动换号摊到两个号 ~40-80 就该歇了。撞风控脚本会自动暂停该号(记3-5h冷却)+缓5分钟+换下一个号继续，全部号冷却才返回 cooling。",
+            taobaoPerProduct: "淘宝每个京东品比价：maxDetail 10-12 即可。京东一个品淘宝几十家店在卖，但拉 10 个候选足够挑出最低价的同款，再多是浪费时间+风控。",
+            reality: "目标 500 个可用品要靠一整天很多轮 + 多账号摊薄，不是一轮定大就行。真正瓶颈是①京东风控限制能拉多少②达标率低(主流品京东定价已低没差价、小众品淘宝没货)。两个京东号都冷却时，别停——继续把库里已抓的候选过淘宝比价(淘宝号独立，不受京东冷却影响)。"
+          },
           actions: {
             core: [
               { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, accountId(可选指定账号), targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },

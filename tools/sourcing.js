@@ -12,7 +12,6 @@ import { profileSummary, createAccount, removeAccount, setAccountStatus, account
 import { isPlatformSupported, findChromeExecutable } from "../lib/platform/index.js";
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
-import { calculateUnitPrice } from "../lib/unit-price.js";
 import { buildAiReviewTask, dbRowToJdProduct } from "../lib/ai-review-task.js";
 
 import { openSourcingDb } from "../lib/db.js";
@@ -371,14 +370,9 @@ function loadStrategyDefaults(db, strategyId) {
 }
 
 function enrichJdCandidateForStorage(candidate) {
-  const unitPriceResult = calculateUnitPrice(candidate.price, candidate.title, candidate.skuInfo || "");
-  return {
-    ...candidate,
-    unitPrice: candidate.unitPrice ?? unitPriceResult.unitPrice,
-    unit: candidate.unit || unitPriceResult.unit || "",
-    spec: candidate.spec || unitPriceResult.spec || null,
-    unitPriceFormula: unitPriceResult.formula || ""
-  };
+  // 脚本只拉不算：京东候选只存原始字段（标题、价格、SKU文本、截图），不算单价。
+  // 单价/利润由 Agent 后续看截图按默认SKU计算，脚本不碰。
+  return { ...candidate };
 }
 
 function saveJdCandidate(db, candidate, strategy) {
@@ -1237,23 +1231,11 @@ export async function handler(ctx, db, input) {
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         });
       } finally { /* 浏览器不关 */ }
-      const taobaoStrategyRejected = [];
-      const candidates = result.candidates.map((candidate) => {
-        const unitPriceResult = calculateUnitPrice(candidate.price, candidate.title, candidate.skuInfo || "");
-        return {
-          ...candidate,
-          unitPrice: candidate.unitPrice ?? unitPriceResult.unitPrice,
-          unit: candidate.unit || unitPriceResult.unit || "",
-          spec: candidate.spec || unitPriceResult.spec || null,
-          unitPriceFormula: unitPriceResult.formula || ""
-        };
-      }).filter((candidate) => {
-        const evaluated = evaluateTaobaoProductByStrategy(candidate, st.strategy);
-        if (evaluated.passed) return true;
-        taobaoStrategyRejected.push({ ...candidate, reason: evaluated.reason });
-        return false;
-      });
-      const rejected = [...(result.rejected || []), ...taobaoStrategyRejected];
+      // 脚本只拉不算：候选原样返回（标题、默认SKU价、SKU选项列表、销量、发货地、截图）。
+      // 单价/利润/SKU换算/同款判断/去重全部由 Agent 看截图完成——脚本不做任何计算或二次筛选
+      // （进详情页淘宝会默认锁定最便宜SKU，脚本算不出真实最小单位单价，只有 Agent 看图能判）。
+      const candidates = result.candidates || [];
+      const rejected = result.rejected || [];
       safeAddLog(db, "info", `taobao_harvest 完成：keyword=${input.keyword}，候选 ${candidates.length}，淘汰 ${rejected.length}`);
       const taobaoStatsSummary = summarizeTaobaoHarvestStats(result.stats);
       if (taobaoStatsSummary) safeAddLog(db, "info", `taobao_harvest 列表筛选摘要：${taobaoStatsSummary}`);

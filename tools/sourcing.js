@@ -1098,6 +1098,7 @@ export async function handler(ctx, db, input) {
           searchSuffix: st.jd.searchSuffix,
           collectShopNames: st.jd.collectShopNames,
           allowedBrands: normalizeAllowedBrands(input.allowedBrands, st.strategy),
+          bannedBrands: st.strategy?.riskControl?.bannedBrands || [],
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "jd"),
           onCandidate: async (candidate) => {
             if (!candidate?.productId || savedIds.has(candidate.productId)) return;

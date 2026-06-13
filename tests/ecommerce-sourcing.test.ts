@@ -20,7 +20,7 @@ import { exportToFeishu } from "../lib/feishu.js";
 import { detectRiskControl } from "../lib/risk-guard.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
-import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
+import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, filterJdProductsForShop, looksLikeJdSearchPageTitle, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
 import { pickAccount, accountCooldownState, cooldownMsForPauseCount, COOLDOWN_FIRST_MS, COOLDOWN_REPEAT_MS, profileSummary } from "../lib/accounts.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
@@ -238,6 +238,26 @@ describe("ecommerce sourcing core", () => {
       { maxDetailPerShop: 12, maxConsecutiveCommentRejectsPerShop: 8 }
     );
     expect(unsorted.stop).toBe(false);
+  });
+
+  it("flags JD search-page/aggregate titles as dirty (not real products)", () => {
+    expect(looksLikeJdSearchPageTitle("沐然健康跨境买手店 - 商品搜索", "沐然健康跨境买手店")).toBe(true);
+    expect(looksLikeJdSearchPageTitle("PRO营养保健买手店 - 商品搜索")).toBe(true);
+    expect(looksLikeJdSearchPageTitle("某某买手店", "某某买手店")).toBe(true);
+    expect(looksLikeJdSearchPageTitle("")).toBe(true);
+    // 真实商品标题不能误判
+    expect(looksLikeJdSearchPageTitle("爱乐维Elevit男士复合维生素 30粒*1盒", "沐然健康跨境买手店")).toBe(false);
+  });
+
+  it("filterJdProductsForShop drops banned-brand products before entering detail", () => {
+    const products = [
+      { productId: "p1", title: "Move Free益节美国氨糖维骨力绿瓶 200粒", shop: "沐然健康跨境买手店" },
+      { productId: "p2", title: "爱乐维Elevit男士复合维生素 30粒", shop: "沐然健康跨境买手店" }
+    ];
+    const banned = [{ name: "益节", aliases: ["Move Free"] }];
+    const result = filterJdProductsForShop(products, "沐然健康跨境买手店", "CGN", new Set(), [], banned);
+    expect(result.matches.map((m: { productId: string }) => m.productId)).toEqual(["p2"]);
+    expect(result.skipped.banned).toBe(1);
   });
 
   it("rotates across available accounts to spread load", () => {

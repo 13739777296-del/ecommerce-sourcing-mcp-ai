@@ -1285,9 +1285,23 @@ export async function handler(ctx, db, input) {
       }
       safeAddLog(db, "info", `taobao_harvest 开始：keyword=${input.keyword}`);
       const session = await openSessionChecked(ctx, db, "taobao", input.accountId || null);
+      // 撞风控自动切换淘宝账号(当前1个号时即暂停+冷却;加了第2个号才真正切换继续)
+      const tbBreatherMs = Number(input.switchBreatherMs) >= 0 ? Number(input.switchBreatherMs) : 5 * 60 * 1000;
+      const tbRotateAccount = async (failedAccount, error) => {
+        if (failedAccount?.id && typeof db.pauseAccountWithCooldown === "function") {
+          db.pauseAccountWithCooldown(failedAccount.id, `风控暂停(自动切换)：${error?.message || "检测到风控"}`);
+        }
+        safeAddLog(db, "warn", `淘宝账号「${failedAccount?.displayName || failedAccount?.id || "?"}」撞风控已暂停，缓 ${Math.round(tbBreatherMs / 60000)} 分钟后切换下一个账号`);
+        if (tbBreatherMs > 0) await new Promise((r) => setTimeout(r, tbBreatherMs));
+        const next = await openSessionChecked(ctx, db, "taobao", null);
+        safeAddLog(db, "info", `已切换到淘宝账号「${next.account?.displayName || next.account?.id}」，重新搜索继续`);
+        return { page: next.page, account: next.account };
+      };
       let result;
       try {
         result = await aiTaobaoHarvest(session.page, input.keyword, {
+          account: session.account,
+          rotateAccount: tbRotateAccount,
           maxList: input.maxCount || 40,
           maxDetail: input.maxDetail || 10,
           minSales: input.minSales ?? st.taobao.minSales,

@@ -97,6 +97,11 @@ export const parameters = {
       default: 7,
       description: "cleanup 用：删除超过这么多天的衍生文件(截图/调试输出)，默认 7 天。登录态和数据库永不清。"
     },
+    switchBreatherMs: {
+      type: "number",
+      default: 300000,
+      description: "jd_harvest 用：撞风控自动切换账号前缓冲毫秒，默认 300000(5分钟)。被封号仍记 3-5 小时冷却。"
+    },
     maxCount: {
       type: "number",
       default: 10
@@ -822,6 +827,7 @@ export async function handler(ctx, db, input) {
       return {
         ok: true,
         action,
+        recommendedAction: usable.length ? "proceed" : (cooling.length ? "wait_and_retry" : "notify_user"),
         accounts,
         usableCount: usable.length,
         coolingCount: cooling.length,
@@ -1153,9 +1159,24 @@ export async function handler(ctx, db, input) {
       const savedIds = new Set();
       const saveErrors = [];
       let savedCount = 0;
+      // 撞风控时脚本自己切换账号、从断点继续，不用 AI 介入：
+      // 暂停当前号(记3-5h冷却) → 缓 switchBreatherMs(默认5分钟) → 挑下一个可用号 →
+      // 没有可用号(全部冷却)就抛 ALL_ACCOUNTS_COOLING，上层返回 cooling+nextRetryAt。
+      const switchBreatherMs = Number(input.switchBreatherMs) >= 0 ? Number(input.switchBreatherMs) : 5 * 60 * 1000;
+      const rotateAccount = async (failedAccount, error) => {
+        if (failedAccount?.id && typeof db.pauseAccountWithCooldown === "function") {
+          db.pauseAccountWithCooldown(failedAccount.id, `风控暂停(自动切换)：${error?.message || "检测到风控"}`);
+        }
+        safeAddLog(db, "warn", `账号「${failedAccount?.displayName || failedAccount?.id || "?"}」撞风控已暂停，缓 ${Math.round(switchBreatherMs / 60000)} 分钟后切换下一个账号`);
+        if (switchBreatherMs > 0) await new Promise((r) => setTimeout(r, switchBreatherMs));
+        const next = await openSessionChecked(ctx, db, "jd", null); // 挑下一个可用号；全冷却会抛 ALL_ACCOUNTS_COOLING
+        safeAddLog(db, "info", `已切换到账号「${next.account?.displayName || next.account?.id}」，从断点继续`);
+        return { page: next.page, account: next.account };
+      };
       try {
         result = await aiJdHarvest(session.page, brand, {
           account: session.account,
+          rotateAccount,
           targetCount: input.targetCount || 10,
           maxPagesPerShop: input.maxPagesPerShop || 3,
           maxShopsPerBrand: input.maxShopsPerBrand || 12,
@@ -1228,6 +1249,7 @@ export async function handler(ctx, db, input) {
         ok: true,
         action,
         brand,
+        recommendedAction: saveErrors.length ? "review" : "proceed",
         stats: result.stats,
         candidateCount: candidates.length,
         candidates,
@@ -1290,6 +1312,7 @@ export async function handler(ctx, db, input) {
       return {
         ok: true,
         action,
+        recommendedAction: "proceed",
         keyword: input.keyword,
         stats: result.stats,
         candidateCount: candidates.length,
@@ -1374,6 +1397,7 @@ export async function handler(ctx, db, input) {
         ok: false,
         action,
         risk: true,
+        recommendedAction: "wait_and_retry",
         accountId: error.accountId,
         accountName: error.accountName,
         screenshotPath: error.screenshotPath,
@@ -1388,6 +1412,7 @@ export async function handler(ctx, db, input) {
         ok: false,
         action,
         cooling: true,
+        recommendedAction: "wait_and_retry",
         nextRetryAt: error.nextRetryAt,
         waitMs: error.waitMs,
         accountId: error.accountId,
@@ -1399,6 +1424,7 @@ export async function handler(ctx, db, input) {
         ok: false,
         action,
         needLogin: true,
+        recommendedAction: "notify_user",
         accountId: error.accountId,
         message: error.message
       };
@@ -1407,6 +1433,7 @@ export async function handler(ctx, db, input) {
       ok: false,
       action,
       error: error.message,
+      recommendedAction: "review",
       message: `操作失败: ${error.message}`
     };
   }

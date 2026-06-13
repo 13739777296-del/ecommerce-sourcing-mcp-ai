@@ -13,6 +13,7 @@ import { isPlatformSupported, findChromeExecutable } from "../lib/platform/index
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
 import { buildAiReviewTask, dbRowToJdProduct } from "../lib/ai-review-task.js";
+import { cleanupOldData, formatBytes, DEFAULT_MAX_AGE_DAYS } from "../lib/cleanup.js";
 
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
@@ -41,7 +42,7 @@ export const parameters = {
     action: {
       type: "string",
       enum: [
-        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap", "setup_guide",
+        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap", "setup_guide", "cleanup",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
@@ -90,6 +91,11 @@ export const parameters = {
       type: "boolean",
       default: false,
       description: "account_health 用：true 时真去打开浏览器探测登录态(有风控成本)，默认 false 只读 DB 状态+冷却(零风控)"
+    },
+    maxAgeDays: {
+      type: "number",
+      default: 7,
+      description: "cleanup 用：删除超过这么多天的衍生文件(截图/调试输出)，默认 7 天。登录态和数据库永不清。"
     },
     maxCount: {
       type: "number",
@@ -375,6 +381,26 @@ function enrichJdCandidateForStorage(candidate) {
   return { ...candidate };
 }
 
+// 自动清理：每天最多跑一次（用 DB preference 记上次时间），清掉 >7 天的衍生文件。
+// 包在 try/catch 里，清理失败绝不影响主流程。登录态/数据库不在清理白名单内，天然安全。
+function maybeAutoCleanup(ctx, db) {
+  try {
+    const last = Number(db.getPreference?.("lastCleanupAt", 0)) || 0;
+    const now = Date.now();
+    if (now - last < 24 * 60 * 60 * 1000) return;
+    db.setPreference?.("lastCleanupAt", now);
+    const dataDir = ctx?.dataDir;
+    if (!dataDir) return;
+    const res = cleanupOldData(dataDir, { maxAgeDays: DEFAULT_MAX_AGE_DAYS });
+    if (res.removedFiles > 0) {
+      safeAddLog(db, "info", `自动清理：删除 ${res.removedFiles} 个 >${res.maxAgeDays}天 旧文件，释放 ${formatBytes(res.freedBytes)}`);
+    }
+  } catch {
+    // 清理失败不影响选品主流程
+  }
+}
+
+
 function saveJdCandidate(db, candidate, strategy) {
   db.saveSourcing({
     productId: candidate.productId,
@@ -445,6 +471,7 @@ export async function handler(ctx, db, input) {
   const action = input.action;
   const platform = input.platform || "jd";
   profileSummary(ctx, db);
+  maybeAutoCleanup(ctx, db);
 
   try {
     // ===== 预热：检查已有浏览器和登录状态（不开关浏览器）=====
@@ -671,6 +698,25 @@ export async function handler(ctx, db, input) {
         steps,
         nextStep,
         message: ready ? "✅ 准备就绪，可以开始选品" : `下一步：${nextStep}`
+      };
+    }
+
+    // ===== 本地数据清理：删 >maxAgeDays 天的衍生文件（截图/调试输出），防磁盘爆 =====
+    // 只清白名单衍生目录；登录态 profiles 和 SQLite 数据库不在白名单，永不会被碰。
+    // handler 入口已每天自动跑一次；此 action 供手动立即清理。
+    if (action === "cleanup") {
+      const maxAgeDays = Number(input.maxAgeDays) > 0 ? Number(input.maxAgeDays) : DEFAULT_MAX_AGE_DAYS;
+      const res = cleanupOldData(ctx?.dataDir || "", { maxAgeDays });
+      if (db.setPreference) db.setPreference("lastCleanupAt", Date.now());
+      safeAddLog(db, "info", `手动清理：删除 ${res.removedFiles} 个 >${maxAgeDays}天 旧文件，释放 ${formatBytes(res.freedBytes)}`);
+      return {
+        ok: true,
+        action,
+        maxAgeDays,
+        removedFiles: res.removedFiles,
+        freed: formatBytes(res.freedBytes),
+        perDir: res.perDir,
+        message: `已清理 >${maxAgeDays}天 旧文件 ${res.removedFiles} 个，释放 ${formatBytes(res.freedBytes)}（登录态和数据库未碰）`
       };
     }
 

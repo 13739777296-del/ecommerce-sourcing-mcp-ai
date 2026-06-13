@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +22,7 @@ import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductB
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
 import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, filterJdProductsForShop, looksLikeJdSearchPageTitle, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
 import { pickAccount, accountCooldownState, cooldownMsForPauseCount, COOLDOWN_FIRST_MS, COOLDOWN_REPEAT_MS, profileSummary } from "../lib/accounts.js";
+import { cleanupOldData } from "../lib/cleanup.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -322,6 +323,36 @@ describe("ecommerce sourcing core", () => {
     expect(upsertCalls).toBe(0);
     expect(accounts[0].status).toBe("available");
     expect(accounts[0].profileDir).toBe("/real/path/jd-A");
+  });
+
+  it("cleanupOldData deletes old derived files but never touches db/profiles", () => {
+    const dataDir = tempDir();
+    // 衍生目录里放新旧文件
+    mkdirSync(join(dataDir, "shots"), { recursive: true });
+    mkdirSync(join(dataDir, "action-runs"), { recursive: true });
+    // 红线目录：登录态 profiles + 数据库文件（白名单外，绝不能被清）
+    mkdirSync(join(dataDir, "profiles", "test-jd"), { recursive: true });
+    const oldShot = join(dataDir, "shots", "old.png");
+    const newShot = join(dataDir, "shots", "new.png");
+    const oldRun = join(dataDir, "action-runs", "old.json");
+    const profileFile = join(dataDir, "profiles", "test-jd", "Cookies");
+    const dbFile = join(dataDir, "ecommerce-sourcing.sqlite");
+    for (const f of [oldShot, newShot, oldRun, profileFile, dbFile]) writeFileSync(f, "x");
+    // 把"旧"文件 mtime 设成 10 天前
+    const tenDaysAgo = (Date.now() - 10 * 24 * 60 * 60 * 1000) / 1000;
+    utimesSync(oldShot, tenDaysAgo, tenDaysAgo);
+    utimesSync(oldRun, tenDaysAgo, tenDaysAgo);
+    utimesSync(profileFile, tenDaysAgo, tenDaysAgo); // 即使很旧，profiles 也不在白名单，不能删
+    utimesSync(dbFile, tenDaysAgo, tenDaysAgo);
+
+    const res = cleanupOldData(dataDir, { maxAgeDays: 7 });
+
+    expect(res.removedFiles).toBe(2); // old.png + old.json
+    expect(existsSync(oldShot)).toBe(false);
+    expect(existsSync(oldRun)).toBe(false);
+    expect(existsSync(newShot)).toBe(true); // 新文件保留
+    expect(existsSync(profileFile)).toBe(true); // 登录态绝不碰
+    expect(existsSync(dbFile)).toBe(true); // 数据库绝不碰
   });
 
   it("escalates block cooldown: 3h first pause, 5h on repeat", () => {

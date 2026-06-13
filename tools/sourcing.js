@@ -8,7 +8,7 @@
  */
 
 import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
-import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus } from "../lib/accounts.js";
+import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus, accountCooldownState, cooldownMsForPauseCount } from "../lib/accounts.js";
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
 import { calculateUnitPrice } from "../lib/unit-price.js";
@@ -45,7 +45,7 @@ export const parameters = {
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
-        "account_list", "account_add", "account_login", "account_check", "account_remove",
+        "account_list", "account_health", "account_add", "account_login", "account_check", "account_remove",
         "sourcing_list", "logs", "export_results", "export_feishu", "ai_review_task", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "close"
       ],
@@ -85,6 +85,11 @@ export const parameters = {
     displayName: {
       type: "string",
       description: "账号管理用：account_add 新账号的显示名(如'京东账号一')"
+    },
+    probe: {
+      type: "boolean",
+      default: false,
+      description: "account_health 用：true 时真去打开浏览器探测登录态(有风控成本)，默认 false 只读 DB 状态+冷却(零风控)"
     },
     maxCount: {
       type: "number",
@@ -212,11 +217,30 @@ async function openSessionChecked(ctx, db, platform, accountId = null) {
       console.log(`[预检] 使用调用方指定账号「${account.displayName}」`);
       return await openAiSessionWithAccount(ctx, db, platform, "about:blank", account.id);
     }
+    // 指定账号仍在封控冷却期：不立刻探测（避免加重风控），直接告知何时可重试。
+    const cd = accountCooldownState(account, Date.now());
+    if (cd.cooling) {
+      const err = new Error(`指定账号仍在封控冷却期：${account.displayName}`);
+      err.code = "ALL_ACCOUNTS_COOLING";
+      err.accountId = account.id;
+      err.nextRetryAt = new Date(cd.readyAt).toISOString();
+      err.waitMs = Math.max(0, cd.readyAt - Date.now());
+      throw err;
+    }
     const probe = await probeAccountLoginStatus(account);
-    setAccountStatus(db, account.id, probe.status, probe.event);
     if (probe.status === "available") {
+      if (account.status === "paused" && typeof db.restoreAccount === "function") {
+        db.restoreAccount(account.id, `封控冷却结束已恢复：${probe.event}`);
+      } else {
+        setAccountStatus(db, account.id, probe.status, probe.event);
+      }
       console.log(`[预检] 指定账号「${account.displayName}」已恢复可用，开始工作`);
       return await openAiSessionWithAccount(ctx, db, platform, "about:blank", account.id);
+    }
+    if (probe.status === "paused" && typeof db.pauseAccountWithCooldown === "function") {
+      db.pauseAccountWithCooldown(account.id, probe.event);
+    } else {
+      setAccountStatus(db, account.id, probe.status, probe.event);
     }
     const err = new Error(`指定账号不可用：${account.displayName}（${probe.event}）`);
     err.code = "NOT_LOGGED_IN";
@@ -241,19 +265,52 @@ async function openSessionChecked(ctx, db, platform, accountId = null) {
     console.log(`[预检] 轮换选用账号「${knownGood.displayName}」（共 ${available.length} 个可用，按最久未用挑选）`);
     return await openAiSessionWithAccount(ctx, db, platform, "about:blank", knownGood.id);
   }
-  // 没有已知可用的，逐个probe
+  // 没有已知可用的：逐个 probe，但封控冷却期内的账号要跳过（歇够时间才重探）。
+  // 这样一个被风控的账号不会被立刻反复探测加重风控，也不会被永久弃用。
+  const now = Date.now();
   const tried = [];
+  const coolingReadyAts = [];
   for (const acct of accounts) {
+    const cd = accountCooldownState(acct, now);
+    if (cd.cooling) {
+      coolingReadyAts.push(cd.readyAt);
+      const mins = Math.max(1, Math.round((cd.readyAt - now) / 60000));
+      tried.push(`${acct.displayName}(封控冷却中，约 ${mins} 分钟后可重试)`);
+      console.log(`[预检] 账号「${acct.displayName}」仍在封控冷却期，跳过（约 ${mins} 分钟后重试）`);
+      continue;
+    }
     const probe = await probeAccountLoginStatus(acct);
-    setAccountStatus(db, acct.id, probe.status, probe.event);
     if (probe.status === "available") {
+      // 冷却结束且登录态仍在 → 恢复账号（重置封控次数），继续工作。
+      if (acct.status === "paused" && typeof db.restoreAccount === "function") {
+        db.restoreAccount(acct.id, `封控冷却结束已恢复：${probe.event}`);
+      } else {
+        setAccountStatus(db, acct.id, probe.status, probe.event);
+      }
       db.touchAccount(acct.id);
       console.log(`[预检] 账号「${acct.displayName}」已登录，开始工作`);
       return await openAiSessionWithAccount(ctx, db, platform, "about:blank", acct.id);
     }
+    // probe 不通过：login_required 直接记状态；paused（又被风控）则带上冷却时间戳。
+    if (probe.status === "paused" && typeof db.pauseAccountWithCooldown === "function") {
+      db.pauseAccountWithCooldown(acct.id, probe.event);
+    } else {
+      setAccountStatus(db, acct.id, probe.status, probe.event);
+    }
     tried.push(`${acct.displayName}(${probe.event})`);
   }
-  // 全部不可用
+  // 全部不可用：若是因为还在封控冷却，返回 ALL_ACCOUNTS_COOLING + 下次可重试时间，
+  // 让调用方（Agent）等待后重试，而不是直接放弃。否则按"需登录"处理。
+  if (coolingReadyAts.length) {
+    const nextRetryAt = Math.min(...coolingReadyAts);
+    const err = new Error(
+      `${platform === "jd" ? "京东" : "淘宝"}所有账号都在封控冷却期。已检查：${tried.join("、")}。`
+    );
+    err.code = "ALL_ACCOUNTS_COOLING";
+    err.nextRetryAt = new Date(nextRetryAt).toISOString();
+    err.waitMs = Math.max(0, nextRetryAt - now);
+    throw err;
+  }
   const err = new Error(
     `${platform === "jd" ? "京东" : "淘宝"}没有已登录的账号。已检查：${tried.join("、")}。` +
     `请先 account_login 扫码登录任一账号再重试。`
@@ -594,6 +651,61 @@ export async function handler(ctx, db, input) {
         count: accounts.length,
         accounts,
         message: `共 ${accounts.length} 个账号（status: available可用 / login_required需登录 / paused风控暂停）`
+      };
+    }
+
+    if (action === "account_health") {
+      // 启动健康检查：汇报每个账号的登录/封控/冷却状态，供 Agent 决定能否开工。
+      // 默认只读 DB 状态 + 计算冷却（不开浏览器，零风控）；probe:true 时才真去探测登录态。
+      const now = Date.now();
+      const doProbe = input.probe === true;
+      const list = db.listAccounts(input.platform || null);
+      const accounts = [];
+      for (const a of list) {
+        const cd = accountCooldownState(a, now);
+        let status = a.status;
+        let event = a.lastEvent;
+        if (doProbe && !cd.cooling && a.status !== "available") {
+          const probe = await probeAccountLoginStatus(a);
+          if (probe.status === "available" && a.status === "paused") {
+            db.restoreAccount(a.id, `健康检查：冷却结束已恢复（${probe.event}）`);
+          } else if (probe.status === "paused") {
+            db.pauseAccountWithCooldown(a.id, probe.event);
+          } else {
+            setAccountStatus(db, a.id, probe.status, probe.event);
+          }
+          status = probe.status;
+          event = probe.event;
+        }
+        accounts.push({
+          id: a.id,
+          platform: a.platform,
+          displayName: a.displayName,
+          status,
+          lastEvent: event,
+          pauseCount: a.pauseCount || 0,
+          pausedAt: a.pausedAt || null,
+          cooling: cd.cooling,
+          nextRetryAt: cd.cooling ? new Date(cd.readyAt).toISOString() : null
+        });
+      }
+      const usable = accounts.filter((a) => a.status === "available");
+      const cooling = accounts.filter((a) => a.cooling);
+      const nextRetryAt = cooling.length
+        ? cooling.map((a) => a.nextRetryAt).sort()[0]
+        : null;
+      return {
+        ok: true,
+        action,
+        accounts,
+        usableCount: usable.length,
+        coolingCount: cooling.length,
+        nextRetryAt,
+        message: usable.length
+          ? `${usable.length} 个账号可用，可以开工`
+          : cooling.length
+            ? `当前无可用账号，${cooling.length} 个在封控冷却期，最早 ${nextRetryAt} 后可重试`
+            : `当前无可用账号，且无冷却中账号——可能需要重新扫码登录（probe:true 可触发真实探测）`
       };
     }
 
@@ -1097,10 +1209,21 @@ export async function handler(ctx, db, input) {
     safeAddLog(db, "error", `${action || "unknown"} 失败：${error.message || String(error)}`);
     if (error.code === "RISK_CONTROL") {
       const event = `风控暂停：${error.message || "检测到风控"}${error.signal ? `（${error.signal}）` : ""}`;
+      let nextRetryAt = null;
       if (error.accountId) {
         try {
-          setAccountStatus(db, error.accountId, "paused", event);
-          safeAddLog(db, "warn", `账号已暂停：${error.accountName || error.accountId} ${event}`);
+          // 带冷却时间戳暂停：首次歇 3h，再次起歇 5h；歇够后会被 openSessionChecked 重探恢复。
+          if (typeof db.pauseAccountWithCooldown === "function") {
+            db.pauseAccountWithCooldown(error.accountId, event);
+            const acct = db.getAccount(error.accountId);
+            if (acct) {
+              const ms = cooldownMsForPauseCount(acct.pauseCount);
+              nextRetryAt = new Date(Date.now() + ms).toISOString();
+            }
+          } else {
+            setAccountStatus(db, error.accountId, "paused", event);
+          }
+          safeAddLog(db, "warn", `账号已暂停：${error.accountName || error.accountId} ${event}${nextRetryAt ? `，约 ${nextRetryAt} 后重试` : ""}`);
         } catch (e) {
           safeAddLog(db, "error", `账号暂停失败：${e instanceof Error ? e.message : String(e)}`);
         }
@@ -1112,7 +1235,21 @@ export async function handler(ctx, db, input) {
         accountId: error.accountId,
         accountName: error.accountName,
         screenshotPath: error.screenshotPath,
+        nextRetryAt,
         message: event
+      };
+    }
+    if (error.code === "ALL_ACCOUNTS_COOLING") {
+      // 所有账号都在封控冷却期：不放弃，告知调用方等待到 nextRetryAt 再重试。
+      safeAddLog(db, "warn", `${error.message}（建议等到 ${error.nextRetryAt} 后重试）`);
+      return {
+        ok: false,
+        action,
+        cooling: true,
+        nextRetryAt: error.nextRetryAt,
+        waitMs: error.waitMs,
+        accountId: error.accountId,
+        message: `${error.message} 请等到 ${error.nextRetryAt} 后重试。`
       };
     }
     if (error.code === "NOT_LOGGED_IN") {

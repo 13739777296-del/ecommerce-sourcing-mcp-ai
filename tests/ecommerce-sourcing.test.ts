@@ -8,6 +8,7 @@ import {
   buildTaobaoSearchKeyword,
   buildTaobaoSearchKeywords,
   coreProductMatched,
+  keywordRelevant,
   parseCommentCount,
   parseSalesCount,
   resolveBrandForTaobao,
@@ -20,7 +21,7 @@ import { detectRiskControl } from "../lib/risk-guard.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
 import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
-import { pickAccount } from "../lib/accounts.js";
+import { pickAccount, accountCooldownState, cooldownMsForPauseCount, COOLDOWN_FIRST_MS, COOLDOWN_REPEAT_MS } from "../lib/accounts.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -271,6 +272,76 @@ describe("ecommerce sourcing core", () => {
     expect(pickAccount({} as never, db as never, "jd").id).toBe("jd-B");
   });
 
+  it("escalates block cooldown: 3h first pause, 5h on repeat", () => {
+    expect(cooldownMsForPauseCount(0)).toBe(COOLDOWN_FIRST_MS);
+    expect(cooldownMsForPauseCount(1)).toBe(COOLDOWN_FIRST_MS);
+    expect(cooldownMsForPauseCount(2)).toBe(COOLDOWN_REPEAT_MS);
+    expect(cooldownMsForPauseCount(5)).toBe(COOLDOWN_REPEAT_MS);
+    expect(COOLDOWN_FIRST_MS).toBe(3 * 60 * 60 * 1000);
+    expect(COOLDOWN_REPEAT_MS).toBe(5 * 60 * 60 * 1000);
+  });
+
+  it("computes cooldown state: cooling within window, ready after it elapses", () => {
+    const pausedAt = "2020-01-01T00:00:00.000Z";
+    const base = Date.parse(pausedAt);
+
+    // 首次封控(pause_count=1)，2 小时后仍在 3h 冷却期内
+    const stillCooling = accountCooldownState(
+      { status: "paused", pausedAt, pauseCount: 1 },
+      base + 2 * 60 * 60 * 1000
+    );
+    expect(stillCooling.cooling).toBe(true);
+    expect(stillCooling.readyAt).toBe(base + COOLDOWN_FIRST_MS);
+
+    // 3 小时 1 分后，首次冷却已过
+    const ready = accountCooldownState(
+      { status: "paused", pausedAt, pauseCount: 1 },
+      base + 3 * 60 * 60 * 1000 + 60000
+    );
+    expect(ready.cooling).toBe(false);
+
+    // 第二次封控(pause_count=2)，4 小时后仍在 5h 冷却期内
+    const repeatCooling = accountCooldownState(
+      { status: "paused", pausedAt, pauseCount: 2 },
+      base + 4 * 60 * 60 * 1000
+    );
+    expect(repeatCooling.cooling).toBe(true);
+    expect(repeatCooling.readyAt).toBe(base + COOLDOWN_REPEAT_MS);
+  });
+
+  it("treats non-paused or timestamp-less accounts as not cooling", () => {
+    expect(accountCooldownState({ status: "available", pausedAt: null, pauseCount: 0 }).cooling).toBe(false);
+    expect(accountCooldownState({ status: "paused", pausedAt: null, pauseCount: 1 }).cooling).toBe(false);
+    expect(accountCooldownState({ status: "login_required", pausedAt: "2020-01-01T00:00:00.000Z", pauseCount: 1 }).cooling).toBe(false);
+    expect(accountCooldownState(null as never).cooling).toBe(false);
+  });
+
+  it("persists paused_at and pause_count, restores reset count (db round-trip)", () => {
+    const dataDir = tempDir();
+    const db = openSourcingDb({ dataDir });
+    try {
+      db.upsertAccount({ id: "jd-X", platform: "jd", displayName: "京东X", profileDir: "/tmp/x", status: "available" });
+
+      db.pauseAccountWithCooldown("jd-X", "风控暂停：搜索弹回首页");
+      let a = db.getAccount("jd-X");
+      expect(a.status).toBe("paused");
+      expect(a.pauseCount).toBe(1);
+      expect(a.pausedAt).toBeTruthy();
+
+      db.pauseAccountWithCooldown("jd-X", "风控暂停：再次触发");
+      a = db.getAccount("jd-X");
+      expect(a.pauseCount).toBe(2);
+
+      db.restoreAccount("jd-X", "冷却结束恢复");
+      a = db.getAccount("jd-X");
+      expect(a.status).toBe("available");
+      expect(a.pauseCount).toBe(0);
+      expect(a.pausedAt).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
   it("rejects irrelevant Taobao candidates before profit comparison", () => {
     expect(coreProductMatched("纽维可还原型辅酶Q10软胶囊60粒", "Newink 还原型辅酶q10 软胶囊")).toBe(true);
     expect(coreProductMatched("CPE路由器工厂设备测试使用反向nano sim卡", "Newink 还原型辅酶q10 软胶囊")).toBe(false);
@@ -290,6 +361,41 @@ describe("ecommerce sourcing core", () => {
     });
 
     expect(reason).toBe("淘宝标题缺少核心品名");
+  });
+
+  it("keyword relevance net drops the bunk bed but keeps the real product (any category)", () => {
+    // 真实复现：搜 "Confidence 硫辛酸 胶囊" 淘宝返回了一张铁架床。硫辛酸不在硬编码品类表里，
+    // coreProductMatched 兜不住（返回 true），但通用词面重合安全网能拦掉。
+    const kw = "Confidence 硫辛酸 胶囊";
+    expect(keywordRelevant("部队14制式营具上下铺课桌椅铁架床制式内务柜高低床", kw)).toBe(false);
+    expect(keywordRelevant("Confidence USA R型硫辛酸胶囊抗糖丸60粒", kw)).toBe(true);
+    expect(keywordRelevant("信心硫辛酸抗糖丸进口正品", kw)).toBe(true);
+    // 关键词抽不出可判据的词时不拦，避免误杀
+    expect(keywordRelevant("任意标题", "胶囊")).toBe(true);
+
+    const filtered = filterTaobaoProductsForHarvest(
+      [
+        {
+          productId: "625737499114",
+          title: "部队14制式营具上下铺课桌椅铁架床制式内务柜高低床单人双层铁床",
+          price: "161",
+          isDomestic: true,
+          ship48h: true,
+          salesNum: 200
+        },
+        {
+          productId: "123456789",
+          title: "Confidence USA R型硫辛酸胶囊抗糖丸 60粒",
+          price: "260",
+          isDomestic: true,
+          ship48h: true,
+          salesNum: 50
+        }
+      ],
+      { requireDomestic: true, require48h: true, minSales: 10, priceMin: 80, priceMax: 999999, keyword: kw }
+    );
+    expect(filtered.matches.map((m) => m.productId)).toEqual(["123456789"]);
+    expect(filtered.skipped.irrelevant).toBe(1);
   });
 
   it("uses product-family checks to avoid false same-product matches", () => {

@@ -884,6 +884,10 @@ export async function handler(ctx, db, input) {
     }
 
     // ===== Agent匹配后存库（京东品+淘宝匹配列表→入库）=====
+    // 设计：脚本不再重新评估/筛选淘宝候选（harvest 已按规则筛过、Agent 已看图判过同款+利润）。
+    // save 只做两件事：①只读防呆（京东禁售品牌兜底拦一下）②把 Agent 给的匹配原样入库。
+    // 接受扁平输入：taobaoMatches:[{ productId, title, price, ..., profitRate, profitAmount }]，
+    // 内部自动整理成 DB 需要的 { taobao:{...}, profit:{...} } 结构，Agent 不用懂嵌套格式。
     if (action === "save_sourcing") {
       const jd = input.jdProduct;
       const matches = input.taobaoMatches || [];
@@ -894,26 +898,50 @@ export async function handler(ctx, db, input) {
         safeAddLog(db, "warn", `save_sourcing 拦截京东品：${jd.productId} ${jdEvaluation.reason}`);
         return { ok: false, action, code: "STRATEGY_REJECTED", message: jdEvaluation.reason };
       }
-      const rejectedMatches = [];
-      const allowedMatches = matches.filter((match) => {
-        const taobao = match?.taobao || match;
-        const evaluated = evaluateTaobaoProductByStrategy(taobao, st.strategy);
-        if (evaluated.passed) return true;
-        rejectedMatches.push({ productId: taobao?.productId || "", reason: evaluated.reason });
-        return false;
-      });
-      db.saveSourcing(jd, allowedMatches, null, { id: st.id });
+      // 把扁平或半嵌套的输入统一整理成 { taobao:{...}, profit:{...} }；缺 productId 的直接跳过。
+      const normalizedMatches = [];
+      const skippedMatches = [];
+      for (const raw of matches) {
+        const tb = raw?.taobao || raw || {};
+        const productId = tb.productId || tb.taobaoProductId || "";
+        if (!productId) {
+          skippedMatches.push({ productId: "", reason: "缺少淘宝 productId" });
+          continue;
+        }
+        const profit = raw?.profit || {};
+        normalizedMatches.push({
+          taobao: {
+            productId,
+            title: tb.title || "",
+            price: tb.price ?? null,
+            unitPrice: tb.unitPrice ?? null,
+            unit: tb.unit || "",
+            sales: tb.sales || "",
+            shop: tb.shop || "",
+            shipFrom: tb.shipFrom || "",
+            isDomestic: tb.isDomestic !== false,
+            shipHours: tb.shipHours ?? null,
+            url: tb.url || "",
+            screenshotPath: tb.screenshotPath || ""
+          },
+          profit: {
+            profitRate: raw?.profitRate ?? profit.profitRate ?? null,
+            profitAmount: raw?.profitAmount ?? profit.profitAmount ?? null
+          }
+        });
+      }
+      db.saveSourcing(jd, normalizedMatches, null, { id: st.id });
       const reviewCleared = markBatchReviewCompleted(ctx, jd.productId);
       const archivedReviewTasks = archiveCompletedReviewTasks(ctx, jd.productId);
-      safeAddLog(db, "info", `save_sourcing 已入库：${jd.productId}，淘宝匹配 ${allowedMatches.length} 条，策略淘汰 ${rejectedMatches.length} 条`);
+      safeAddLog(db, "info", `save_sourcing 已入库：${jd.productId}，淘宝匹配 ${normalizedMatches.length} 条，跳过 ${skippedMatches.length} 条`);
       return {
         ok: true,
         action,
-        saved: allowedMatches.length,
-        rejectedMatches,
+        saved: normalizedMatches.length,
+        rejectedMatches: skippedMatches,
         reviewCleared,
         archivedReviewTasks,
-        message: `已存库: 1个京东品 + ${allowedMatches.length}个淘宝匹配`
+        message: `已存库: 1个京东品 + ${normalizedMatches.length}个淘宝匹配`
       };
     }
 

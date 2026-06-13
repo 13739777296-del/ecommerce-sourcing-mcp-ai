@@ -21,7 +21,7 @@ import { detectRiskControl } from "../lib/risk-guard.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
 import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
-import { pickAccount, accountCooldownState, cooldownMsForPauseCount, COOLDOWN_FIRST_MS, COOLDOWN_REPEAT_MS } from "../lib/accounts.js";
+import { pickAccount, accountCooldownState, cooldownMsForPauseCount, COOLDOWN_FIRST_MS, COOLDOWN_REPEAT_MS, profileSummary } from "../lib/accounts.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
 
 const tempDirs: string[] = [];
@@ -270,6 +270,38 @@ describe("ecommerce sourcing core", () => {
       upsertAccount: () => {}
     };
     expect(pickAccount({} as never, db as never, "jd").id).toBe("jd-B");
+  });
+
+  it("profileSummary never overwrites an account already in the DB", () => {
+    // 回归：迁移发现(discoverLegacyAccounts)探测到 missing 时，绝不能把 DB 里
+    // 已存在账号的 available/paused 状态和正确 profile_dir 冲掉。DB 一旦有就以 DB 为准。
+    const dataDir = tempDir();
+    // 放一个迁移文件，引用一个"已在 DB 里"的账号 id（profile 目录不存在 → 发现侧会判 missing）
+    writeFileSync(
+      join(dataDir, "legacy-accounts.json"),
+      JSON.stringify([{ id: "jd-A", platform: "jd", displayName: "京东A" }])
+    );
+    const accounts = [
+      { id: "jd-A", platform: "jd", displayName: "京东A", status: "available", profileDir: "/real/path/jd-A" }
+    ];
+    let upsertCalls = 0;
+    const db = {
+      listAccounts: () => accounts,
+      upsertAccount: (acct: { id: string }) => {
+        upsertCalls += 1;
+        const existing = accounts.find((a) => a.id === acct.id);
+        if (existing) Object.assign(existing, acct);
+        else accounts.push(acct as never);
+      }
+    };
+    const ctx = { dataDir, config: { get: () => "" } };
+
+    profileSummary(ctx as never, db as never);
+
+    // jd-A 已在 DB，发现侧虽探测到它(missing)，但必须被跳过，不能 upsert 覆盖。
+    expect(upsertCalls).toBe(0);
+    expect(accounts[0].status).toBe("available");
+    expect(accounts[0].profileDir).toBe("/real/path/jd-A");
   });
 
   it("escalates block cooldown: 3h first pause, 5h on repeat", () => {

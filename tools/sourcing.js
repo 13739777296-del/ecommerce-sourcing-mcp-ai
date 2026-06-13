@@ -9,6 +9,7 @@
 
 import { openAiSessionWithAccount, openAiSession, aiJdSearch, aiExtractJdProducts, aiClickProduct, aiExtractJdDetail, aiJdHarvest, aiTaobaoHarvest, aiTaobaoSearchByImage, aiTaobaoSearch, aiExtractTaobaoProducts } from "../lib/ai-controller.js";
 import { profileSummary, createAccount, removeAccount, setAccountStatus, accountLoginUrl, probeAccountLoginStatus, accountCooldownState, cooldownMsForPauseCount } from "../lib/accounts.js";
+import { isPlatformSupported, findChromeExecutable } from "../lib/platform/index.js";
 import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_STRATEGIES, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
 import { calculateUnitPrice } from "../lib/unit-price.js";
@@ -41,7 +42,7 @@ export const parameters = {
     action: {
       type: "string",
       enum: [
-        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap",
+        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap", "setup_guide",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
@@ -492,6 +493,7 @@ export async function handler(ctx, db, input) {
         guide: {
           name: "电商选品MCP",
           description: "一套通用AI驱动选品引擎。京东找买手店候选 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
+          onboarding: "新用户/新电脑第一步：调用 setup_guide（只读零风控），它会用大白话告诉你当前缺什么、下一步该做什么（装Chrome？加账号？扫码登录？）。照着返回的 nextStep 一步步走，直到 ready=true 再开始选品。",
           workflow: "jd_harvest(京东候选先入库，列表已按评论数倒序，评价达标才进) → Agent审核清洗候选(确认是买手店/评价≥门槛/价格在区间) → Agent从京东标题提取品牌+核心品名(去掉规格/装量/营销词) → taobao_harvest(keyword=品牌+核心品名，并把 brand 单独传入做标题品牌过滤) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
           actions: {
             core: [
@@ -512,9 +514,12 @@ export async function handler(ctx, db, input) {
               { name: "notify_user", desc: "通过飞书发通知给用户（仅通知，不是聊天）", note: "飞书是单向通知渠道。如需双向对话，用Hermes/OpenClaw等工具接入本MCP" },
             ],
             accounts: [
+              { name: "setup_guide", desc: "【新手第一步】只读检查准备进度，用大白话给出下一步(装Chrome/加账号/扫码)，ready=true 才能开工" },
               { name: "account_list", desc: "列出所有账号及状态" },
-              { name: "account_login", desc: "打开浏览器扫码登录账号" },
-              { name: "account_check", desc: "探测账号真实登录态" },
+              { name: "account_add", desc: "添加一个账号(platform:jd/taobao)，返回 accountId 和下一步指引" },
+              { name: "account_login", desc: "打开浏览器扫码登录账号(accountId)" },
+              { name: "account_check", desc: "探测账号真实登录态(accountId)" },
+              { name: "account_health", desc: "汇报所有账号登录/封控/冷却状态，默认零风控只读" },
             ],
             strategy: [
               { name: "strategy_templates", desc: "查看内置策略模板" },
@@ -592,6 +597,84 @@ export async function handler(ctx, db, input) {
         message: mode === "command"
           ? `请在需要操作 Chrome 的用户电脑运行：${command}`
           : "已返回本机 worker 初始化说明。服务器 MCP 只排队转发，真正打开 Chrome 的是用户电脑 local-worker。"
+      };
+    }
+
+    // ===== 傻瓜开箱引导：一次只读调用，汇报准备进度 + 用大白话给出下一步 =====
+    // 设计给"完全不懂技术的人"：Agent 调这个 action 就能知道当前缺什么、该让用户做什么。
+    // 全程零风控（只读 DB + 查 Chrome 安装位置，不开浏览器）。
+    if (action === "setup_guide") {
+      const platformOk = isPlatformSupported();
+      const chromePath = platformOk ? findChromeExecutable() : null;
+      const allAccounts = db.listAccounts(null);
+      const byPlatform = {
+        jd: allAccounts.filter((a) => a.platform === "jd"),
+        taobao: allAccounts.filter((a) => a.platform === "taobao")
+      };
+      const summarize = (list) => list.map((a) => ({
+        id: a.id,
+        displayName: a.displayName,
+        status: a.status,
+        needLogin: a.status !== "available"
+      }));
+
+      const steps = [];
+      let nextStep = "";
+      let ready = false;
+
+      if (!platformOk) {
+        nextStep = `当前操作系统（${process.platform}）暂不支持，本工具目前支持 macOS 和 Windows。`;
+        steps.push({ key: "platform", ok: false, text: nextStep });
+      } else {
+        steps.push({ key: "platform", ok: true, text: `操作系统 ${process.platform} 受支持` });
+
+        if (!chromePath) {
+          nextStep = "没有找到 Google Chrome。请先安装正式版 Chrome（https://www.google.cn/chrome/），装好后再继续。";
+          steps.push({ key: "chrome", ok: false, text: nextStep });
+        } else {
+          steps.push({ key: "chrome", ok: true, text: "已找到本机 Google Chrome" });
+
+          const jdReady = byPlatform.jd.some((a) => a.status === "available");
+          const tbReady = byPlatform.taobao.some((a) => a.status === "available");
+
+          if (allAccounts.length === 0) {
+            nextStep = "还没有添加任何账号。先加京东账号：调用 account_add(platform:\"jd\")，然后 account_login 扫码。建议至少 1 个京东号 + 1 个淘宝号。";
+            steps.push({ key: "accounts", ok: false, text: "账号池为空" });
+          } else if (!jdReady) {
+            const pending = byPlatform.jd.find((a) => a.status !== "available");
+            nextStep = pending
+              ? `京东账号「${pending.displayName}」还没登录。调用 account_login(accountId:"${pending.id}") 打开登录页，用手机扫码，再调 account_check 确认。`
+              : "还没有京东账号。调用 account_add(platform:\"jd\") 添加，再 account_login 扫码登录。";
+            steps.push({ key: "jd", ok: false, text: "京东暂无可用账号" });
+          } else if (!tbReady) {
+            const pending = byPlatform.taobao.find((a) => a.status !== "available");
+            nextStep = pending
+              ? `淘宝账号「${pending.displayName}」还没登录。调用 account_login(accountId:"${pending.id}") 扫码登录，再 account_check 确认。`
+              : "京东已就绪，还差淘宝账号。调用 account_add(platform:\"taobao\") 添加，再 account_login 扫码登录。";
+            steps.push({ key: "jd", ok: true, text: "京东已有可用账号" });
+            steps.push({ key: "taobao", ok: false, text: "淘宝暂无可用账号" });
+          } else {
+            ready = true;
+            nextStep = "京东和淘宝都有可用账号，准备就绪。可以说\"开始选品\"了。";
+            steps.push({ key: "jd", ok: true, text: "京东已有可用账号" });
+            steps.push({ key: "taobao", ok: true, text: "淘宝已有可用账号" });
+          }
+        }
+      }
+
+      return {
+        ok: true,
+        action,
+        ready,
+        platformOk,
+        chromeFound: Boolean(chromePath),
+        accounts: {
+          jd: summarize(byPlatform.jd),
+          taobao: summarize(byPlatform.taobao)
+        },
+        steps,
+        nextStep,
+        message: ready ? "✅ 准备就绪，可以开始选品" : `下一步：${nextStep}`
       };
     }
 

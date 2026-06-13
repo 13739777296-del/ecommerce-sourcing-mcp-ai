@@ -19,7 +19,7 @@ import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { exportToFeishu, bindFeishu, sendFeishuMsg, startFeishuChannel, readFeishuMsgs } from "../lib/feishu.js";
-import { buildBootstrapGuide, buildWorkerInstallCommand, installScriptUrl } from "../lib/bootstrap-guide.js";
+import { buildBootstrapGuide, buildWorkerInstallCommand, buildWorkerInstallCommandWindows, installScriptUrl } from "../lib/bootstrap-guide.js";
 
 export const description = "电商选品All-in-One工具。支持：账号池、策略库、京东候选入库、淘宝供货采集、结果保存、日志和导出。推荐由 Agent 分段执行。";
 
@@ -586,6 +586,7 @@ export async function handler(ctx, db, input) {
 
     if (action === "bootstrap") {
       const command = buildWorkerInstallCommand();
+      const commandWindows = buildWorkerInstallCommandWindows();
       const mode = input.mode || "guide";
       return {
         ok: true,
@@ -593,10 +594,11 @@ export async function handler(ctx, db, input) {
         mode,
         installScriptUrl: installScriptUrl(),
         installCommand: command,
+        installCommandWindows: commandWindows,
         guide: mode === "command" ? null : buildBootstrapGuide(),
         message: mode === "command"
-          ? `请在需要操作 Chrome 的用户电脑运行：${command}`
-          : "已返回本机 worker 初始化说明。服务器 MCP 只排队转发，真正打开 Chrome 的是用户电脑 local-worker。"
+          ? `请在需要操作 Chrome 的用户电脑运行：macOS → ${command}；Windows(PowerShell) → ${commandWindows}`
+          : "已返回本机 worker 初始化说明（含 macOS 和 Windows 两种）。服务器 MCP 只排队转发，真正打开 Chrome 的是用户电脑 local-worker。"
       };
     }
 

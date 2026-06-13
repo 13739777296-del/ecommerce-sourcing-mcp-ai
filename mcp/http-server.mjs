@@ -71,6 +71,12 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/install.ps1") {
+      const script = readFileSync(join(pluginRoot, "scripts", "install-worker.ps1"), "utf8");
+      sendText(res, 200, script, "text/plain; charset=utf-8");
+      return;
+    }
+
     if (url.pathname === "/worker/poll" || url.pathname === "/worker/result") {
       await handleWorkerRequest(req, res, url);
       return;

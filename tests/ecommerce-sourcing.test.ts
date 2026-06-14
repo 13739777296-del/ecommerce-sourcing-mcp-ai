@@ -1299,7 +1299,7 @@ describe("ecommerce sourcing core", () => {
       jdProduct: {
         productId: "jd-reviewed-empty",
         title: "KaKife 白番茄烟酰胺 60粒",
-        price: 89,
+        price: 189,
         comments: "3",
         shop: "京东买手店",
         shopType: "buyer",
@@ -1339,7 +1339,7 @@ describe("ecommerce sourcing core", () => {
       jdProduct: {
         productId: "jd-reviewed-archive",
         title: "MegaGold 辅酶Q10 软胶囊 60粒",
-        price: 96,
+        price: 196,
         comments: "3",
         shop: "京东买手店",
         shopType: "buyer",
@@ -1364,8 +1364,8 @@ describe("ecommerce sourcing core", () => {
       jdProduct: {
         productId: "jd-low-source-1",
         title: "MegaGold 辅酶Q10 软胶囊 60粒",
-        price: 96,
-        unitPrice: 1.6,
+        price: 196,
+        unitPrice: 3.27,
         unit: "粒",
         shop: "京东买手店",
         shopType: "buyer",

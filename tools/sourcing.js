@@ -203,11 +203,7 @@ export const parameters = {
     },
     tasks: {
       type: "array",
-      description: "taobao_batch_harvest用：一批 {jdProductId, keyword, brand} —— Agent 一次性给京东品的淘宝关键词，脚本自动逐个搜、候选写成审核包，全跑完通知Agent统一比价。"
-    },
-    keywords: {
-      type: "array",
-      description: "set_taobao_keyword用：一批 {jdProductId, keyword} —— Agent 把生成的淘宝关键词写进对应京东品(持久化入库)。之后 taobao_batch_harvest 不传 tasks 也能自动读库里有关键词、未比价的品。"
+      description: "taobao_batch_harvest用：一批 {jdProductId, keyword, brand}；set_taobao_keyword用：一批 {jdProductId, keyword} 把关键词写进对应京东品(持久化)。"
     },
     taobaoMatches: {
       type: "array",
@@ -351,19 +347,20 @@ function loadStrategyDefaults(db, strategyId) {
       collectShopNames: s.platforms?.jd?.collectShopNames !== false,
       shopTypes: s.platforms?.jd?.shopTypes || { include: ["buyer"], exclude: [] },
       minComments: s.platforms?.jd?.minComments ?? 2,
-      priceRange: s.platforms?.jd?.priceRange || [80, 999999]
+      priceRange: s.platforms?.jd?.priceRange || [100, 999999]
     },
     taobao: {
       shipFrom: s.platforms?.taobao?.shipFrom || "domestic",
       shipWithinHours: s.platforms?.taobao?.shipWithinHours ?? 48,
       minSales: s.platforms?.taobao?.minSales ?? 10,
-      priceRange: s.platforms?.taobao?.priceRange || [80, 999999],
-      requireBrandInTitle: s.platforms?.taobao?.requireBrandInTitle ?? true
+      priceRange: s.platforms?.taobao?.priceRange || [1, 999999],
+      requireBrandInTitle: s.platforms?.taobao?.requireBrandInTitle ?? true,
+      requireAllKeywordTokens: s.platforms?.taobao?.requireAllKeywordTokens ?? true
     },
     profit: {
       minRate: s.profit?.minRate ?? 0.35,
-      maxRate: s.profit?.maxRate ?? 0.60,
-      minAmount: s.profit?.minAmount ?? 20
+      maxRate: s.profit?.maxRate ?? null,
+      minAmount: s.profit?.minAmount ?? 40
     },
     riskControl: {
       retryAfterHours: s.riskControl?.retryAfterHours ?? base.riskControl?.retryAfterHours ?? 5,
@@ -1386,6 +1383,7 @@ export async function handler(ctx, db, input) {
           priceRange: st.taobao.priceRange,
           brand: input.brand || "",
           requireBrandInTitle: input.requireBrandInTitle ?? st.taobao.requireBrandInTitle ?? true,
+          requireAllKeywordTokens: input.requireAllKeywordTokens ?? st.taobao.requireAllKeywordTokens ?? true,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         });
       } finally { /* 浏览器不关 */ }
@@ -1423,9 +1421,10 @@ export async function handler(ctx, db, input) {
 
     // ===== Agent 把淘宝关键词写进京东品(持久化)：传 keywords:[{jdProductId, keyword}] 批量写 =====
     if (action === "set_taobao_keyword") {
-      const items = Array.isArray(input.keywords) ? input.keywords
+      const items = Array.isArray(input.tasks) ? input.tasks
+        : Array.isArray(input.keywords) ? input.keywords
         : (input.jdProductId && input.keyword ? [{ jdProductId: input.jdProductId, keyword: input.keyword }] : []);
-      if (!items.length) return { ok: false, action, message: "缺少 keywords:[{jdProductId, keyword}] 或 jdProductId+keyword" };
+      if (!items.length) return { ok: false, action, message: "缺少 tasks:[{jdProductId, keyword}] 或 jdProductId+keyword" };
       let updated = 0;
       const notFound = [];
       for (const it of items) {
@@ -1479,6 +1478,7 @@ export async function handler(ctx, db, input) {
           require48h: input.require48h ?? (st.taobao.shipWithinHours === 48),
           priceRange: st.taobao.priceRange,
           requireBrandInTitle: input.requireBrandInTitle ?? st.taobao.requireBrandInTitle ?? true,
+          requireAllKeywordTokens: input.requireAllKeywordTokens ?? st.taobao.requireAllKeywordTokens ?? true,
           screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
         },
         runTaobaoHarvest: (page, keyword, opts) => aiTaobaoHarvest(page, keyword, opts),

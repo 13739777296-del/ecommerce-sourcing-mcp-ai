@@ -9,6 +9,7 @@ import {
   buildTaobaoSearchKeywords,
   coreProductMatched,
   keywordRelevant,
+  keywordAllTokensMatch,
   parseCommentCount,
   parseSalesCount,
   resolveBrandForTaobao,
@@ -444,6 +445,19 @@ describe("ecommerce sourcing core", () => {
     });
 
     expect(reason).toBe("淘宝标题缺少核心品名");
+  });
+
+  it("keywordAllTokensMatch requires ALL keyword tokens in title (strict filter)", () => {
+    // 用户要求：标题必须含搜索词的每一个关键词才点进详情
+    const kw = "美安 离子钙";
+    expect(keywordAllTokensMatch("美国美安钙粉Calcium离子钙等渗强钙配方", kw)).toBe(true);
+    expect(keywordAllTokensMatch("美安 维生素C", kw)).toBe(false); // 缺"离子钙"
+    expect(keywordAllTokensMatch("某品牌离子钙片", kw)).toBe(false); // 缺"美安"
+    // 多词全含才过
+    expect(keywordAllTokensMatch("Nature Made 褪黑素 3mg", "Nature Made 褪黑素")).toBe(true);
+    expect(keywordAllTokensMatch("其他品牌 褪黑素", "Nature Made 褪黑素")).toBe(false);
+    // 抽不出可判据 token 时不拦
+    expect(keywordAllTokensMatch("任意标题", "胶囊")).toBe(true);
   });
 
   it("keyword relevance net drops the bunk bed but keeps the real product (any category)", () => {

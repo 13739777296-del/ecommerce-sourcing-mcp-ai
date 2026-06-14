@@ -46,7 +46,7 @@ export const parameters = {
         "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap", "setup_guide", "cleanup",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
-        "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest", "taobao_batch_harvest",
+        "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest", "taobao_batch_harvest", "set_taobao_keyword",
         "account_list", "account_health", "account_add", "account_login", "account_check", "account_remove",
         "sourcing_list", "logs", "export_results", "export_feishu", "ai_review_task", "review_list", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "close"
@@ -204,6 +204,10 @@ export const parameters = {
     tasks: {
       type: "array",
       description: "taobao_batch_harvest用：一批 {jdProductId, keyword, brand} —— Agent 一次性给京东品的淘宝关键词，脚本自动逐个搜、候选写成审核包，全跑完通知Agent统一比价。"
+    },
+    keywords: {
+      type: "array",
+      description: "set_taobao_keyword用：一批 {jdProductId, keyword} —— Agent 把生成的淘宝关键词写进对应京东品(持久化入库)。之后 taobao_batch_harvest 不传 tasks 也能自动读库里有关键词、未比价的品。"
     },
     taobaoMatches: {
       type: "array",
@@ -1417,10 +1421,41 @@ export async function handler(ctx, db, input) {
       };
     }
 
+    // ===== Agent 把淘宝关键词写进京东品(持久化)：传 keywords:[{jdProductId, keyword}] 批量写 =====
+    if (action === "set_taobao_keyword") {
+      const items = Array.isArray(input.keywords) ? input.keywords
+        : (input.jdProductId && input.keyword ? [{ jdProductId: input.jdProductId, keyword: input.keyword }] : []);
+      if (!items.length) return { ok: false, action, message: "缺少 keywords:[{jdProductId, keyword}] 或 jdProductId+keyword" };
+      let updated = 0;
+      const notFound = [];
+      for (const it of items) {
+        const id = String(it.jdProductId || "");
+        const kw = String(it.keyword || "").trim();
+        if (!id || !kw) continue;
+        const res = db.setTaobaoKeyword(id, kw);
+        if (res && res.changes > 0) updated += 1;
+        else notFound.push(id);
+      }
+      safeAddLog(db, "info", `set_taobao_keyword：写入 ${updated} 个京东品关键词，未找到 ${notFound.length} 个`);
+      return {
+        ok: true,
+        action,
+        recommendedAction: "proceed",
+        updated,
+        notFound,
+        message: `已给 ${updated} 个京东品写入淘宝关键词。下一步直接调 taobao_batch_harvest(不用传 tasks，自动读库里有关键词、未比价的京东品)。`
+      };
+    }
+
     // ===== 淘宝批量比价拉取：Agent 一次性给一批关键词，脚本自动逐个搜+写审核包，全跑完通知 Agent 统一比价 =====
     if (action === "taobao_batch_harvest") {
-      const tasks = Array.isArray(input.tasks) ? input.tasks : [];
-      if (!tasks.length) return { ok: false, action, message: "缺少 tasks 数组（每项 {jdProductId, keyword, brand}）" };
+      // 不传 tasks 时，自动从库里读"有关键词、未比价"的京东品（关键词已入库的标准流程）。
+      let tasks = Array.isArray(input.tasks) ? input.tasks : [];
+      if (!tasks.length) {
+        tasks = db.listJdProductsPendingTaobao(input.limit || 500)
+          .map((r) => ({ jdProductId: r.jdProductId, keyword: r.taobaoKeyword, brand: r.jdBrand || "" }));
+      }
+      if (!tasks.length) return { ok: false, action, message: "没有待比价的京东品(库里没有「有关键词且未比价」的品)。先 set_taobao_keyword 写关键词，或直接传 tasks。" };
       const st = loadStrategyDefaults(db, input.strategyId);
       const tbBreatherMs = Number(input.switchBreatherMs) >= 0 ? Number(input.switchBreatherMs) : 5 * 60 * 1000;
       const openTaobaoSession = () => openSessionChecked(ctx, db, "taobao", null);

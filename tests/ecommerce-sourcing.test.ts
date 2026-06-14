@@ -116,6 +116,31 @@ describe("ecommerce sourcing core", () => {
     expect(result.signal).toContain("risk");
   });
 
+  it("detects taobao login-lost (popup/redirect) as a risk signal to trigger account switch", async () => {
+    // 淘宝弹"请重新登录"登录框 = 账号失效，必须识别为风控→触发换号(之前漏检导致掉号不换)
+    const byText = await detectRiskControl({
+      url: () => "https://s.taobao.com/search?q=test",
+      locator: () => ({ innerText: async () => "密码登录 短信登录 请重新登录 忘记密码 免费注册" })
+    });
+    expect(byText.blocked).toBe(true);
+    expect(byText.signal).toContain("登录失效");
+
+    // 跳到登录页 URL 也算
+    const byUrl = await detectRiskControl({
+      url: () => "https://login.taobao.com/member/login.jhtml",
+      locator: () => ({ innerText: async () => "" })
+    });
+    expect(byUrl.blocked).toBe(true);
+    expect(byUrl.signal).toContain("登录失效");
+
+    // 正常搜索页不误判
+    const normal = await detectRiskControl({
+      url: () => "https://s.taobao.com/search?q=test",
+      locator: () => ({ innerText: async () => "为你推荐 综合 销量 价格 包邮 登录" })
+    });
+    expect(normal.blocked).toBe(false);
+  });
+
   it("keeps multi-word brands compact in Taobao keywords", () => {
     const keywords = buildTaobaoSearchKeywords({
       brand: "VITA GROW",

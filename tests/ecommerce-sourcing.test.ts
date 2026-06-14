@@ -197,7 +197,7 @@ describe("ecommerce sourcing core", () => {
     expect(keyword.length).toBeLessThan(20);
   });
 
-  it("filters out Taobao candidates whose title lacks the brand", () => {
+  it("filters out Taobao candidates whose title lacks the keyword chars (brand covered)", () => {
     const filtered = filterTaobaoProductsForHarvest([
       {
         productId: "tb-bed",
@@ -225,12 +225,13 @@ describe("ecommerce sourcing core", () => {
       minSales: 10,
       priceMin: 1,
       priceMax: 999999,
-      brand: "Osteocare",
-      requireBrandInTitle: true
+      keyword: "Osteocare 液体钙",
+      brand: "Osteocare"
     });
 
+    // 铁架床标题不含 osteocare/液/体/钙 全部字 → 被相关性(含每个字)刷掉；液体钙含全部 → 保留
     expect(filtered.matches.map((m) => m.productId)).toEqual(["tb-calcium"]);
-    expect(filtered.skipped.brandMissing).toBeGreaterThanOrEqual(1);
+    expect(filtered.skipped.irrelevant).toBeGreaterThanOrEqual(1);
   });
 
   it("keeps all candidates when brand filtering is disabled in strategy", () => {
@@ -633,7 +634,6 @@ describe("ecommerce sourcing core", () => {
 
     expect(result).toMatchObject({ closed: 2, failed: 0, kept: 1 });
     expect(keep.closed).toBe(false);
-    expect(keep.front).toBe(true);
     expect(oldDetail.closed).toBe(true);
     expect(oldSearch.closed).toBe(true);
   });

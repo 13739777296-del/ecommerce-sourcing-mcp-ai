@@ -21,7 +21,7 @@ import { exportToFeishu } from "../lib/feishu.js";
 import { detectRiskControl } from "../lib/risk-guard.js";
 import { DEFAULT_STRATEGIES, evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, evaluateWithStrategy, findBannedBrandMatch } from "../lib/strategy-engine.js";
 import { calculateUnitPrice, compareUnitPrice } from "../lib/unit-price.js";
-import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, filterJdProductsForShop, looksLikeJdSearchPageTitle, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
+import { compactSessionTabs, extractJdSearchKeyword, filterTaobaoProductsForHarvest, filterJdProductsForShop, looksLikeJdSearchPageTitle, jdProductSignature, jdProductMatchesAllowedBrands, jdProductMatchesBrandSeed, jdSearchKeywordMatches, shouldStopJdShopHarvest } from "../lib/ai-controller.js";
 import { pickAccount, accountCooldownState, cooldownMsForPauseCount, COOLDOWN_FIRST_MS, COOLDOWN_REPEAT_MS, profileSummary } from "../lib/accounts.js";
 import { cleanupOldData } from "../lib/cleanup.js";
 import { execute as sourcingExecute } from "../tools/sourcing.js";
@@ -286,6 +286,38 @@ describe("ecommerce sourcing core", () => {
     const result = filterJdProductsForShop(products, "沐然健康跨境买手店", "CGN", new Set(), [], banned);
     expect(result.matches.map((m: { productId: string }) => m.productId)).toEqual(["p2"]);
     expect(result.skipped.banned).toBe(1);
+  });
+
+  it("filterJdProductsForShop: 列表页价格<下限不点详情 + 同品跨店只在更低价时才点", () => {
+    const shop = "某买手店";
+    const seenProductPrice = new Map<string, number>();
+    // 第一家店：爱乐维 ¥178(≥100)收；便宜货 ¥80(<100)刷
+    const r1 = filterJdProductsForShop([
+      { productId: "a1", title: "爱乐维Elevit男士复合维生素 30粒", shop, price: "178" },
+      { productId: "cheap", title: "朴诺叶黄素 60粒", shop, price: "80" }
+    ], shop, "", new Set(), [], [], { priceMin: 100, seenProductPrice });
+    expect(r1.matches.map((m: { productId: string }) => m.productId)).toEqual(["a1"]);
+    expect(r1.skipped.priceTooLow).toBe(1);
+
+    // 第二家店：同品爱乐维 ¥199(比已见¥178高)→不点；同品爱乐维 ¥150(更低)→点
+    const r2 = filterJdProductsForShop([
+      { productId: "a2", title: "爱乐维Elevit男士复合维生素 30粒", shop: "店二", price: "199" }
+    ], "店二", "", new Set(), [], [], { priceMin: 100, seenProductPrice });
+    expect(r2.matches.length).toBe(0);
+    expect(r2.skipped.dupProduct).toBe(1);
+
+    const r3 = filterJdProductsForShop([
+      { productId: "a3", title: "爱乐维Elevit男士复合维生素 30粒", shop: "店三", price: "150" }
+    ], "店三", "", new Set(), [], [], { priceMin: 100, seenProductPrice });
+    expect(r3.matches.map((m: { productId: string }) => m.productId)).toEqual(["a3"]);
+  });
+
+  it("jdProductSignature 同品同指纹、不同品不同指纹", () => {
+    const s1 = jdProductSignature("爱乐维Elevit男士复合维生素 30粒*1盒", "爱乐维");
+    const s2 = jdProductSignature("爱乐维Elevit男士复合维生素 30粒*2盒", "爱乐维");
+    const s3 = jdProductSignature("挪威小鱼DHA鳕鱼油 60ml", "挪威小鱼");
+    expect(s1).toBe(s2); // 同品不同装量 → 同指纹
+    expect(s1).not.toBe(s3);
   });
 
   it("rotates across available accounts to spread load", () => {

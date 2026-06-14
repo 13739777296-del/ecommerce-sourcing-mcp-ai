@@ -43,7 +43,7 @@ export const parameters = {
     action: {
       type: "string",
       enum: [
-        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap", "setup_guide", "cleanup",
+        "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "strategy_export", "strategy_import", "usage_guide", "batch_guide", "bootstrap", "setup_guide", "cleanup",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest", "taobao_batch_harvest", "set_taobao_keyword",
@@ -123,6 +123,14 @@ export const parameters = {
     strategy: {
       type: "object",
       description: "自定义策略对象"
+    },
+    strategyJson: {
+      type: "string",
+      description: "strategy_import 用：策略的 JSON 字符串(别人导出的策略)。也可用 strategy 对象或 path 文件路径导入。"
+    },
+    path: {
+      type: "string",
+      description: "strategy_import 用：策略 JSON 文件路径(strategy_export 导出的文件)。"
     },
     imageUrl: {
       type: "string",
@@ -571,6 +579,7 @@ export async function handler(ctx, db, input) {
             "京东第一段搜'品牌+买手店'(如GNC 买手店)找买手店名；第二段只搜买手店名，不拼产品名。批量脚本会传入allowedBrands，买手店页里命中任一可用品牌的商品都可进入详情。",
             "多个账号可用时，调用方可在 jd_harvest / taobao_harvest / 单步搜索里传 accountId，明确指定本次使用哪个账号；账号平台不匹配会直接拒绝，不会打开浏览器。",
             "禁售品牌在策略库 riskControl.bannedBrands 里配置，命中后不启动采集、不入库。",
+            "策略可分享：strategy_export 把当前策略导出成 JSON 文件，发给别人；别人 strategy_import 导入即用同一套选品规则(京东价下限/利润率/利润额/相关性筛等)。没有现成策略也可让 Agent 按自己品类和利润预期定制后 strategy_import。",
             "jd_harvest会先保存京东候选；返回后，Agent必须做两件事：(1)审核清洗候选——确认是买手店、评价≥策略门槛、价格在区间内，淘汰不合规的；(2)从京东标题提取'品牌+核心品名'（去掉规格/装量/营销词）。",
             "调用taobao_harvest时，keyword传'品牌+核心品名'，并务必把 brand 单独传入（如\"Osteocare\"）：淘宝标题不含该品牌词的商品会被直接跳过，杜绝铁架床这类无关品。是否强制品牌由策略库 platforms.taobao.requireBrandInTitle 控制（默认true），用户可在自己的策略里关闭。",
             "京东列表会自动点'按评论总数倒序'，评论高的排前面；逐个进详情时连续2个评论不达标即跳过该店（降序后后面只会更低）。多账号会自动轮换分摊压力。",
@@ -779,6 +788,56 @@ export async function handler(ctx, db, input) {
         builtin: false
       });
       return { ok: true, action, strategy, message: `策略已保存：${strategy.id}` };
+    }
+
+    // 导出策略为 JSON 文件，方便分享给别人(别人 strategy_import 导入就能用同一套选品规则)。
+    if (action === "strategy_export") {
+      const strategy = getStrategyById(db, input.strategyId || "no-source-arbitrage");
+      if (!strategy) return { ok: false, action, message: `策略不存在: ${input.strategyId}` };
+      const outDir = pathJoin(ctx?.dataDir || ".", "exports");
+      mkdirSync(outDir, { recursive: true });
+      const outPath = pathJoin(outDir, `strategy_${strategy.id}_${Date.now()}.json`);
+      writeFileSync(outPath, JSON.stringify(strategy, null, 2), "utf8");
+      return {
+        ok: true,
+        action,
+        recommendedAction: "proceed",
+        strategy,
+        path: outPath,
+        message: `策略已导出到 ${outPath}。把这个 JSON 发给别人，对方用 strategy_import 导入即可用同一套规则。`
+      };
+    }
+
+    // 导入策略：从 strategy 对象 或 JSON 字符串(strategyJson) 或 文件路径(path) 导入。
+    // 允许覆盖自定义策略；内置策略 id 需改名后导入。
+    if (action === "strategy_import") {
+      let strategy = input.strategy || null;
+      if (!strategy && typeof input.strategyJson === "string") {
+        try { strategy = JSON.parse(input.strategyJson); } catch { return { ok: false, action, message: "strategyJson 不是合法 JSON" }; }
+      }
+      if (!strategy && typeof input.path === "string" && existsSync(input.path)) {
+        try { strategy = JSON.parse(readFileSync(input.path, "utf8")); } catch { return { ok: false, action, message: "导入文件不是合法 JSON" }; }
+      }
+      if (!strategy || typeof strategy !== "object" || !strategy.id) {
+        return { ok: false, action, message: "缺少可导入的 strategy(需含 id)。可传 strategy 对象 / strategyJson 字符串 / path 文件路径。" };
+      }
+      if (DEFAULT_STRATEGIES[strategy.id]) {
+        return { ok: false, action, message: `「${strategy.id}」是内置策略 id，导入会冲突。请把 strategy.id 改名后再导入。` };
+      }
+      db.upsertStrategyProfile({
+        id: String(strategy.id),
+        name: String(strategy.name || strategy.id),
+        description: String(strategy.description || ""),
+        strategy,
+        builtin: false
+      });
+      return {
+        ok: true,
+        action,
+        recommendedAction: "proceed",
+        strategy,
+        message: `策略已导入：${strategy.id}。选品时传 strategyId:"${strategy.id}" 即用这套规则。`
+      };
     }
 
     // ===== 账号池管理（每个用户管自己的账号，存本机，隔离）=====

@@ -14,6 +14,7 @@ import { evaluateJdProductByStrategy, evaluateTaobaoProductByStrategy, DEFAULT_S
 import { buildTaobaoSearchKeywords, extractBrand, resolveBrandForTaobao } from "../lib/logic.js";
 import { buildAiReviewTask, dbRowToJdProduct } from "../lib/ai-review-task.js";
 import { cleanupOldData, formatBytes, DEFAULT_MAX_AGE_DAYS } from "../lib/cleanup.js";
+import { runTaobaoBatch } from "../lib/batch-harvest.js";
 
 import { openSourcingDb } from "../lib/db.js";
 import { join as pathJoin, dirname } from "node:path";
@@ -45,7 +46,7 @@ export const parameters = {
         "strategy_list", "strategy_get", "strategy_save", "strategy_templates", "usage_guide", "batch_guide", "bootstrap", "setup_guide", "cleanup",
         "warmup",
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
-        "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest",
+        "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest", "taobao_batch_harvest",
         "account_list", "account_health", "account_add", "account_login", "account_check", "account_remove",
         "sourcing_list", "logs", "export_results", "export_feishu", "ai_review_task", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "close"
@@ -199,6 +200,10 @@ export const parameters = {
     taobaoCandidates: {
       type: "array",
       description: "ai_review_task用：taobao_harvest返回的淘宝候选数组，由Agent做同款/SKU/利润审核"
+    },
+    tasks: {
+      type: "array",
+      description: "taobao_batch_harvest用：一批 {jdProductId, keyword, brand} —— Agent 一次性给京东品的淘宝关键词，脚本自动逐个搜、候选写成审核包，全跑完通知Agent统一比价。"
     },
     taobaoMatches: {
       type: "array",
@@ -1348,6 +1353,55 @@ export async function handler(ctx, db, input) {
         ],
         agentInstructions: buildTaobaoCleaningInstructions(result.candidates.length, st),
         message: `淘宝选品完成：${result.candidates.length}个符合(国内+48h+已售达标)的货源，请按 agentInstructions 比价`
+      };
+    }
+
+    // ===== 淘宝批量比价拉取：Agent 一次性给一批关键词，脚本自动逐个搜+写审核包，全跑完通知 Agent 统一比价 =====
+    if (action === "taobao_batch_harvest") {
+      const tasks = Array.isArray(input.tasks) ? input.tasks : [];
+      if (!tasks.length) return { ok: false, action, message: "缺少 tasks 数组（每项 {jdProductId, keyword, brand}）" };
+      const st = loadStrategyDefaults(db, input.strategyId);
+      const tbBreatherMs = Number(input.switchBreatherMs) >= 0 ? Number(input.switchBreatherMs) : 5 * 60 * 1000;
+      const openTaobaoSession = () => openSessionChecked(ctx, db, "taobao", null);
+      const rotateAccount = async (failedAccount, error) => {
+        if (failedAccount?.id && typeof db.pauseAccountWithCooldown === "function") {
+          db.pauseAccountWithCooldown(failedAccount.id, `风控暂停(批量自动切换)：${error?.message || "检测到风控"}`);
+        }
+        safeAddLog(db, "warn", `淘宝批量：账号「${failedAccount?.displayName || failedAccount?.id || "?"}」撞风控暂停，缓 ${Math.round(tbBreatherMs / 60000)} 分钟后切换`);
+        if (tbBreatherMs > 0) await new Promise((r) => setTimeout(r, tbBreatherMs));
+        return openSessionChecked(ctx, db, "taobao", null);
+      };
+      const summary = await runTaobaoBatch({
+        ctx,
+        db,
+        tasks,
+        harvestOpts: {
+          maxList: input.maxCount || 40,
+          maxDetail: input.maxDetail || 10,
+          minSales: input.minSales ?? st.taobao.minSales,
+          requireDomestic: input.requireDomestic ?? (st.taobao.shipFrom === "domestic"),
+          require48h: input.require48h ?? (st.taobao.shipWithinHours === 48),
+          priceRange: st.taobao.priceRange,
+          requireBrandInTitle: input.requireBrandInTitle ?? st.taobao.requireBrandInTitle ?? true,
+          screenshotDir: pathJoin(ctx?.dataDir || ".", "shots", "taobao")
+        },
+        runTaobaoHarvest: (page, keyword, opts) => aiTaobaoHarvest(page, keyword, opts),
+        openTaobaoSession,
+        rotateAccount,
+        buildTask: (jd, candidates, keyword) => buildAiReviewTask({ jdProduct: jd, taobaoCandidates: candidates, keyword, strategy: st.strategy }),
+        getJdRow: (id) => db.getSourcingResult(id),
+        toJdProduct: (row) => dbRowToJdProduct(row),
+        log: (level, msg) => safeAddLog(db, level, msg)
+      });
+      safeAddLog(db, "info", `taobao_batch_harvest 完成：处理 ${summary.processed}，写审核包 ${summary.written}，跳过 ${summary.skipped}，失败 ${summary.failed}${summary.interrupted ? "（中断:" + summary.error + "）" : ""}`);
+      return {
+        ok: !summary.interrupted,
+        action,
+        recommendedAction: summary.interrupted ? "wait_and_retry" : "review",
+        ...summary,
+        message: summary.interrupted
+          ? `淘宝批量中断（${summary.error}）：已写 ${summary.written} 个审核包，可稍后重试续跑（已完成的会自动跳过）`
+          : `淘宝批量完成：${summary.written} 个京东品已拉到淘宝候选并写审核包，跳过 ${summary.skipped}，失败 ${summary.failed}。下一步：Agent 逐个看审核包(review-tasks/)做同款+利润判断，达标的 save_sourcing。`
       };
     }
 

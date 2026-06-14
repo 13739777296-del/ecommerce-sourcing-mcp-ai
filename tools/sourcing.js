@@ -48,7 +48,7 @@ export const parameters = {
         "jd_search", "jd_extract", "jd_detail", "jd_search_filter", "jd_harvest",
         "taobao_search", "taobao_search_image", "taobao_extract", "taobao_harvest", "taobao_batch_harvest",
         "account_list", "account_health", "account_add", "account_login", "account_check", "account_remove",
-        "sourcing_list", "logs", "export_results", "export_feishu", "ai_review_task", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
+        "sourcing_list", "logs", "export_results", "export_feishu", "ai_review_task", "review_list", "save_sourcing", "bind_feishu", "start_feishu_channel", "check_feishu_msgs", "notify_user",
         "close"
       ],
       description: `操作类型：
@@ -525,7 +525,7 @@ export async function handler(ctx, db, input) {
           name: "电商选品MCP",
           description: "一套通用AI驱动选品引擎。京东找买手店候选 → 淘宝比价 → 筛选利润 → 导出表格。策略可配，引擎通用。",
           onboarding: "新用户/新电脑第一步：调用 setup_guide（只读零风控），它会用大白话告诉你当前缺什么、下一步该做什么（装Chrome？加账号？扫码登录？）。照着返回的 nextStep 一步步走，直到 ready=true 再开始选品。",
-          workflow: "jd_harvest(京东候选先入库，列表已按评论数倒序，评价达标才进) → Agent审核清洗候选(确认是买手店/评价≥门槛/价格在区间) → Agent从京东标题提取品牌+核心品名(去掉规格/装量/营销词) → taobao_harvest(keyword=品牌+核心品名，并把 brand 单独传入做标题品牌过滤) → ai_review_task生成审核包 → Agent/多模态模型亲自做同款+SKU换算+利润判断 → save_sourcing写入淘宝匹配 → sourcing_list确认 → 导出",
+          workflow: "标准批量流程(换任何 Agent 照此跑)：1) jd_harvest 拉京东候选(自动换号/断点续跑，撞风控自己暂停+冷却+换下一个号) → 返回里带 suggestedTaobaoTasks(每个京东品的 jdProductId + 关键词候选)；2) Agent 从 suggestedTaobaoTasks 微调出 tasks:[{jdProductId,keyword,brand}](关键词=品牌+核心品名，去规格/营销词) → taobao_batch_harvest 一次性批量拉(脚本自动逐个搜、候选写审核包、撞风控自动换号、断点续跑)；3) review_list 列出待比价审核包；4) Agent 逐个看 jdProduct+taobaoCandidate 截图核同款规格、按默认SKU算利润率，达标(35-60%且≥¥20)的调 save_sourcing 入库(save 后审核包自动归档)；5) sourcing_list 确认 → export_results/export_feishu 导出。",
           batchSizing: {
             model: "迭代轮次：一轮 jd_harvest 拉一批京东候选 → 把这批全部过 taobao_harvest 比价 → 看达标数 → 没攒够目标就再来一轮。别一次把 targetCount 定几百，会一次烧光账号。",
             jdPerRound: "京东一轮 targetCount 建议 40-60：一个京东号撞风控前大概只能安全拉 20-40 个，靠 in-call 自动换号摊到两个号 ~40-80 就该歇了。撞风控脚本会自动暂停该号(记3-5h冷却)+缓5分钟+换下一个号继续，全部号冷却才返回 cooling。",
@@ -534,12 +534,15 @@ export async function handler(ctx, db, input) {
           },
           actions: {
             core: [
-              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛", params: "brand, accountId(可选指定账号), targetCount(默认10), maxPagesPerShop(默认3), maxShopsPerBrand(默认12), maxDetailPerShop(默认12), maxConsecutiveCommentRejectsPerShop(默认8)" },
-              { name: "taobao_harvest", desc: "淘宝比价：搜关键词→筛品牌+国内+48h+已售→进详情→SKU+截图", params: "keyword, brand(强烈建议传：从京东标题提取的品牌名，淘宝标题不含该品牌会被跳过), accountId(可选指定账号), minSales(默认10), requireDomestic, require48h, requireBrandInTitle(默认随策略，true时标题必须含品牌)" },
+              { name: "jd_harvest", desc: "京东选品：搜品牌+买手店找买手店名→只搜店名→进详情→评价>=策略门槛。撞风控自动暂停+冷却+换号+断点续跑", params: "brand, targetCount(建议40-60), maxShopsPerBrand, maxDetailPerShop, switchBreatherMs(换号缓冲默认5分钟)" },
+              { name: "taobao_batch_harvest", desc: "【批量推荐】一次传一批关键词，脚本自动逐个淘宝搜、候选写审核包、撞风控自动换号、断点续跑，全跑完通知Agent统一比价", params: "tasks:[{jdProductId,keyword,brand}], maxDetail(默认10), switchBreatherMs" },
+              { name: "taobao_harvest", desc: "淘宝比价(单个)：搜关键词→筛品牌+国内+48h+已售→进详情→SKU+截图。批量请用 taobao_batch_harvest", params: "keyword, brand(强烈建议传), minSales, requireDomestic, require48h, requireBrandInTitle" },
             ],
             data: [
-              { name: "ai_review_task", desc: "生成AI审核任务包：只给证据、策略和输出格式，不由脚本裁决同款、SKU单位价或利润", params: "jdProduct或jdProductId, taobaoCandidates, keyword, strategyId" },
-              { name: "save_sourcing", desc: "Agent匹配后存库：京东品+淘宝匹配列表→入库，供导出用", params: "jdProduct, taobaoMatches, strategyId" },
+              { name: "review_list", desc: "列出待比价审核包(taobao_batch_harvest 写的)：返回每个京东品+淘宝候选+截图路径，Agent逐个看图比价。save_sourcing后自动归档", params: "limit" },
+              { name: "ai_review_task", desc: "生成单个AI审核任务包：只给证据、策略和输出格式，不由脚本裁决同款、SKU单位价或利润", params: "jdProduct或jdProductId, taobaoCandidates, keyword, strategyId" },
+              { name: "save_sourcing", desc: "Agent匹配后存库：京东品+淘宝匹配列表→入库(扁平输入即可，含profitRate/profitAmount)，供导出用", params: "jdProduct, taobaoMatches, strategyId" },
+              { name: "cleanup", desc: "清理>maxAgeDays天的衍生文件(截图/调试输出)防磁盘爆。登录态和数据库不碰。handler入口每天自动跑一次", params: "maxAgeDays(默认7)" },
               { name: "sourcing_list", desc: "查看当前已入库的京东候选和淘宝匹配数量，适合断点续跑或导出前确认", params: "limit" },
               { name: "logs", desc: "查看最近 MCP 操作日志，排查哪一步失败或是否已经入库", params: "limit" },
               { name: "export_results", desc: "导出CSV到本地，表格含京东+淘宝+利润+链接；导出前会按同款商品最终去重" },
@@ -937,6 +940,64 @@ export async function handler(ctx, db, input) {
         action,
         task,
         message: `已生成AI审核任务包：京东1个，淘宝候选${task.taobaoCandidates.length}个。下一步由Agent/多模态模型换算SKU和利润，再调用save_sourcing。`
+      };
+    }
+
+    // ===== 列出待比价审核包：taobao_batch_harvest 写的审核包都在 review-tasks/，这里列给 Agent 逐个比价 =====
+    // 标准流程入口：任何 Agent 调它就知道有哪些品要比、京东品+淘宝候选+截图路径在哪。比完 save_sourcing 会自动归档。
+    if (action === "review_list") {
+      const reviewDir = pathJoin(ctx?.dataDir || ".", "review-tasks");
+      const limit = clampLimit(input.limit, 50);
+      const pending = [];
+      if (existsSync(reviewDir)) {
+        const files = readdirSync(reviewDir)
+          .filter((f) => f.endsWith(".json"))
+          .sort();
+        for (const fileName of files) {
+          if (pending.length >= limit) break;
+          try {
+            const parsed = JSON.parse(readFileSync(pathJoin(reviewDir, fileName), "utf8"));
+            const t = parsed?.task || parsed;
+            const jd = t?.jdProduct || {};
+            const cands = Array.isArray(t?.taobaoCandidates) ? t.taobaoCandidates : [];
+            pending.push({
+              file: fileName,
+              keyword: t?.keyword || "",
+              jdProduct: {
+                productId: jd.productId || "",
+                title: jd.title || "",
+                price: jd.price ?? null,
+                skuInfo: jd.skuInfo || jd.skuText || "",
+                screenshotPath: jd.screenshotPath || ""
+              },
+              taobaoCandidateCount: cands.length,
+              taobaoCandidates: cands.map((c) => ({
+                productId: c.productId || "",
+                title: c.title || "",
+                price: c.price ?? null,
+                skuInfo: c.skuInfo || "",
+                selectedSkuOptions: c.selectedSkuOptions || [],
+                sales: c.sales || c.salesCount || "",
+                shipFrom: c.shipFrom || "",
+                url: c.url || "",
+                screenshotPath: c.screenshotPath || ""
+              }))
+            });
+          } catch {
+            // 跳过损坏的审核包文件
+          }
+        }
+      }
+      return {
+        ok: true,
+        action,
+        recommendedAction: pending.length ? "review" : "proceed",
+        pendingCount: pending.length,
+        pending,
+        instruction: "逐个看 jdProduct.screenshotPath 和每个 taobaoCandidate.screenshotPath 的截图，核同款规格(剂量/粒数/装量)，按默认SKU算单位价和利润率。达标(利润率35-60%且利润≥¥20)的调 save_sourcing 入库(传 jdProduct + taobaoMatches，含 profitRate/profitAmount)。save 成功后该审核包自动归档，不再出现在 review_list。",
+        message: pending.length
+          ? `有 ${pending.length} 个待比价审核包。逐个看截图核同款+算利润，达标的 save_sourcing。`
+          : "没有待比价审核包。可以先 jd_harvest 拉京东候选 → taobao_batch_harvest 批量拉淘宝。"
       };
     }
 

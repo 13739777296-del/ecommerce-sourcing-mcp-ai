@@ -92,7 +92,8 @@ describe("ecommerce sourcing MCP server", () => {
       arguments: { action: "usage_guide" }
     });
     expect(toolJson(guideTool).guide.workflow).toContain("jd_harvest");
-    expect(toolJson(guideTool).guide.workflow).toContain("ai_review_task");
+    expect(toolJson(guideTool).guide.workflow).toContain("taobao_batch_harvest");
+    expect(toolJson(guideTool).guide.workflow).toContain("review_list");
     expect(toolJson(guideTool).guide.workflow).toContain("save_sourcing");
     expect(toolJson(guideTool).guide.workflow).toContain("sourcing_list");
 
